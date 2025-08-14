@@ -1,3 +1,5 @@
+
+
 const util = require('util');
 const exec = util.promisify(require('child_process').exec);
 const spawn = require('child_process').spawn;
@@ -6,38 +8,134 @@ const path = require('path');
 const vscode = require('vscode');
 const chokidar = require('chokidar');
 
-let syncedFilePath = null;
 let LOCAL_COMMAND_FILE = '';
 let LOCAL_SYNC_DIR = '';
 let AIX_USER = '';
 let AIX_HOST = '';
 let mount_dir = '';
 let keyPath = '';
-let config='';
-let Open_files ={};
+let localtoRemote = new Map();
+let TEMP_DIR = '';
+
+class AixFSProvider {
+    constructor(aixUser, aixHost, keyPath,temp_dir) {
+        this.aixUser = aixUser;
+        this.aixHost = aixHost;
+        this.keyPath = keyPath;
+        this.tempDir = temp_dir || path.join(require('os').tmpdir(), 'aixfs');
+        this._emitter = new vscode.EventEmitter(); // Needed for watch
+        this.onDidChangeFile = this._emitter.event;
+
+        // Store last known mtimes to detect changes
+        this._lastModified = new Map();
+    }
+
+async readFile(uri) {
+    const remotePath = uri.path;
+    const preview_localPath = path.join(require('os').tmpdir(), path.basename(remotePath)+'view');
+    const localPath = path.join(this.tempDir, path.basename(remotePath));
+
+    vscode.window.setStatusBarMessage(`Reading file from AIX: ${remotePath}`, 2000);
+   
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        const sshProc = spawn('rsync', [
+            '-avz',
+            '-e', `ssh -i ${this.keyPath}`,
+            `${this.aixUser}@${this.aixHost}:"${remotePath}"`,
+            preview_localPath
+        ]);
+
+        sshProc.stdout.on('data', chunk => chunks.push(chunk));
+        sshProc.stderr.on('data', err => console.error(`SSH error: ${err}`));
+
+        sshProc.on('close', code => {
+            if (code === 0) {
+                // Save mtime
+                this._lastModified.set(remotePath, Date.now());
+                exec(`cp "${preview_localPath}" "${localPath}"`)
+                resolve(fs.readFileSync(preview_localPath)); // still return Buffer for VS Code API
+            } else {
+                reject(new Error(`SSH exited with code ${code}`));
+            }
+        });
+    });
+}
+
+
+    async writeFile(uri, content, options) {
+        const remotePath = uri.path;
+        const tmpFile = path.join(this.tempDir, path.basename(remotePath));
+        const preview_tmpFile =  path.join(require('os').tmpdir(), path.basename(remotePath)+'view');
+        fs.writeFileSync(preview_tmpFile, content);
+        await exec(
+            `rsync -avz -e "ssh -i ${this.keyPath}" "${preview_tmpFile}" ${this.aixUser}@${this.aixHost}:"${remotePath}"`
+        );
+        await exec('cp ' + preview_tmpFile + ' ' + tmpFile);
+
+        // Update mtime after writing
+        this._lastModified.set(remotePath, Date.now());
+
+        // Notify watchers
+        this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
+    }
+
+watch(uri, options) {
+    const remotePath = uri.path;
+    const localPath = path.join(this.tempDir, path.basename(remotePath));
+
+    const interval = setInterval(async () => {
+        try {
+            const { stdout } = await exec(
+                `ssh -i ${this.keyPath} ${this.aixUser}@${this.aixHost} "perl -e 'print ((stat shift)[9])' '${remotePath}'"`
+            );
+
+            const mtime = parseInt(stdout.trim(), 10);
+            const lastMtime = this._lastModified.get(remotePath);
+
+            if (!lastMtime) {
+                this._lastModified.set(remotePath, mtime);
+            } else if (mtime !== lastMtime) {
+                this._lastModified.set(remotePath, mtime);
+
+                // Pull new version to temp folder
+                //Pull new version to the preview mode
+
+                // await exec(`rsync -avz -e "ssh -i ${this.keyPath}" "${this.aixUser}@${this.aixHost}:'${remotePath}'" "${localPath}"`);
+
+                this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
+            }
+        } catch (err) {
+            console.error(`Watch error for ${remotePath}: ${err.message}`);
+        }
+    }, 3000);
+
+    return new vscode.Disposable(() => clearInterval(interval));
+}
+
+
+
+    stat(uri) {
+        return { type: vscode.FileType.File, ctime: Date.now(), mtime: Date.now(), size: 0 };
+    }
+    readDirectory() { return []; }
+    createDirectory() {}
+    delete() {}
+    rename() {}
+}
+
 
 function activate(context) {
-    const terminal = vscode.window.createTerminal('Rsync Mount');
-    terminal.show();
-
     const disposable = vscode.commands.registerCommand('remote-rsync.helloWorld', async function () {
-        const folder = await vscode.window.showOpenDialog({
-            canSelectFolders: true,
-            canSelectFiles: false,
-            canSelectMany: false,
-            openLabel: 'Open Folder'
-        });
-        if (!folder) {
-            vscode.window.showErrorMessage('No folder selected for mounting');
-            return;
-        }
-
-        mount_dir = folder[0].fsPath;
+        mount_dir = vscode.workspace.workspaceFolders[0].uri.fsPath;
         fs.mkdirSync(path.join(mount_dir, '.sshfs'), { recursive: true });
         LOCAL_SYNC_DIR = path.join(mount_dir, '.sshfs');
 
         const logins = loadconfig(context) || [];
-        const quickPickItems = [...logins.map(login => ({ label: login })), { label: 'Enter new login', alwaysShow: true }];
+        const quickPickItems = [
+            ...logins.map(login => ({ label: login })),
+            { label: 'Enter new login', alwaysShow: true }
+        ];
         const selected = await vscode.window.showQuickPick(quickPickItems, { placeHolder: 'Select a saved login or enter a new one' });
         if (!selected) return;
 
@@ -50,6 +148,37 @@ function activate(context) {
 
         [AIX_USER, AIX_HOST] = value.split('@');
         await mountSSHFS(context, value, mount_dir);
+
+       TEMP_DIR = path.join(mount_dir, `temp_${AIX_HOST}`);
+       fs.mkdirSync(TEMP_DIR, { recursive: true });
+
+        // Register the virtual file system provider for aix:
+        const provider = new AixFSProvider(AIX_USER, AIX_HOST, keyPath,TEMP_DIR);
+        context.subscriptions.push(
+            vscode.workspace.registerFileSystemProvider(`aix_${AIX_HOST}`, provider, { isCaseSensitive: true })
+        );
+
+        // for the case when we load the files from local temp
+        vscode.workspace.onDidOpenTextDocument(doc => {
+        const filePath = doc.uri.fsPath;
+
+        // Check if it's inside your temp dir
+        if (filePath.startsWith(TEMP_DIR)) {
+            const fileName = path.basename(filePath);
+            
+            // Figure out the remote path mapping from filename
+            const remotePath = localtoRemote.get(fileName);
+
+            // Re-open using your VFS scheme
+            const vfsUri = vscode.Uri.parse(`aix_${AIX_HOST}:${remotePath}`);
+            vscode.workspace.openTextDocument(vfsUri).then(newDoc => {
+                vscode.window.showTextDocument(newDoc, { preview: true });
+                 vscode.commands.executeCommand('workbench.action.closeActiveEditor');  // to close the opened local fileeditor.
+            });
+        }
+    });
+
+
         watchCommandFile();
     });
 
@@ -57,66 +186,28 @@ function activate(context) {
 }
 
 function watchCommandFile() {
-    LOCAL_COMMAND_FILE = path.join(LOCAL_SYNC_DIR, 'command.txt');
-    
-    
+    LOCAL_COMMAND_FILE = path.join(LOCAL_SYNC_DIR, `command_${AIX_HOST}.txt`);
+
     chokidar.watch(LOCAL_COMMAND_FILE).on('change', () => {
         const target = fs.readFileSync(LOCAL_COMMAND_FILE, 'utf8').trim();
         if (target) pullFromAix(target);
     });
-
-    
-
-    // vscode.workspace.onDidSaveTextDocument((doc) => {
-    //     vscode.window.showInformationMessage(`File saved: ${doc.fileName}. ${syncedFilePath ? 'Syncing...' : ''}`);
-    //     console.log(`File saved: ${doc.fileName}`);
-
-    //     if (syncedFilePath && doc.fileName === syncedFilePath) {
-    //         console.log(`File ${doc.fileName} is synced, pushing to AIX...`);
-    //         vscode.window.showInformationMessage(`File saved: ${doc.fileName}`);
-    //         pushToAix(target);
-    //     }
-    // });
 }
 
 async function pullFromAix(remotePath) {
-    const filename = path.basename(remotePath);
-    if (!Open_files.FILES) {
-    Open_files.FILES = {};
-    }
-    Open_files.FILES[filename] = remotePath;
-
-    Open_files['aix_user'] = AIX_USER;
-    Open_files['aix_host'] = AIX_HOST;
-
-    fs.writeFileSync(mount_dir+'/aix_config.json',JSON.stringify(Open_files,null,2), 'utf8');
-
-    const localPath = path.join(mount_dir, filename);
-    const remoteFull = `${AIX_USER}@${AIX_HOST}:${remotePath}`;
-    const rsyncCmd = `rsync -avz -e "ssh -i ${keyPath}" ${remoteFull} ${mount_dir}`;
-    try {
-        await exec(rsyncCmd);
-        syncedFilePath = localPath;
-        exec(`code "${syncedFilePath}"`); // no need to await here
-    } catch (err) {
-        console.error(`Pull failed: ${err}`);
-    }
+    remotePath = path.posix.normalize(remotePath);
+    localtoRemote.set(path.basename(remotePath),remotePath);
+    const uri = vscode.Uri.parse(`aix_${AIX_HOST}:${remotePath}`);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(doc);
 }
-
-// function pushToAix(filePath) {
-//     if (!filePath) return;
-//     const remoteTarget = `${AIX_USER}@${AIX_HOST}:${path.basename(filePath)}`;
-//     const rsyncCmd = `rsync -avz -e "ssh -i ${keyPath}" "${filePath}" ${remoteTarget}`;
-//     exec(rsyncCmd).catch(err => console.error(`Push failed: ${err}`));
-// }
 
 function saveConfig(context, login) {
     const configPath = vscode.Uri.joinPath(context.globalStorageUri, 'sshfs-config.json').fsPath;
     let logins = [];
     if (fs.existsSync(configPath)) {
-        try { logins = JSON.parse(fs.readFileSync(configPath, 'utf8')); config= logins[0] } catch {}
+        try { logins = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
     }
-    
     if (!logins.includes(login)) logins.push(login);
     fs.mkdirSync(context.globalStorageUri.fsPath, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(logins, null, 2));
@@ -133,20 +224,16 @@ function loadconfig(context) {
 async function mountSSHFS(context, value, mount_dir) {
     const [userHost, remotePath = '/'] = value.split(':');
     keyPath = `${process.env.HOME}/.ssh/id_rsa_${AIX_HOST}`;
-    const pubKeyPath = `${keyPath}.pub`;
     const code_bash = fs.readFileSync(path.join(__dirname, 'code.sh'), 'utf8');
     const safeCode = code_bash
-        .replace(/"/g, '\"') // Escape double quotes
-        .replace(/'/g, "\'") // Escape single quotes
-        .replace(/\$/g, '\$');  // Escape dollar signs
+        .replace(/"/g, '\"')
+        .replace(/'/g, "\'")
+        .replace(/\$/g, '\$');
 
-
-    // Generate key if not exists
     if (!fs.existsSync(keyPath)) {
         await exec(`ssh-keygen -t rsa -b 4096 -f ${keyPath} -N ""`);
     }
 
-    // Ask for password
     const password = await vscode.window.showInputBox({
         prompt: `Enter password for ${userHost}`,
         password: true
@@ -157,45 +244,34 @@ async function mountSSHFS(context, value, mount_dir) {
         { location: vscode.ProgressLocation.Notification, title: `Mounting ${value}...` },
         async () => {
             try {
-                // Step 1: Run expect to copy SSH key
+                if(!fs.existsSync(keyPath)) {
                 await runExpect(userHost, keyPath, password);
                 vscode.window.showInformationMessage(`SSH key copied to ${userHost}`);
+                } else {
+                vscode.window.showInformationMessage(`SSH key already exists at ${keyPath}`);
+                }
+            
 
-                // Step 2: Create remote .sshfs dir and command.txt
                 const mkdirCmd = `ssh -i ${keyPath} -o StrictHostKeyChecking=no ${userHost} 'bash -s' <<'EOF'
                 mkdir -p ~/.sshfs
                 > ~/.sshfs/command.txt
-                echo pkgs.txt >> ~/.sshfs/command.txt
+                echo /pkgs.txt >> ~/.sshfs/command.txt
                 > ~/.bashrc
                 cat <<'EOC' >> ~/.bashrc
                 ${safeCode}`;
+                await exec(mkdirCmd);
 
-                 await exec(mkdirCmd);
-
-                // Step 3: Start watcher.py
                 const watcherScript = path.join(__dirname, 'watcher.py');
                 if (!fs.existsSync(watcherScript)) {
                     vscode.window.showErrorMessage('Watcher script not found');
                     return;
                 }
                 fs.chmodSync(watcherScript, '755');
-                const pyProc = spawn('python3', [watcherScript, AIX_USER, AIX_HOST, keyPath,LOCAL_SYNC_DIR]);
+                const pyProc = spawn('python3', [watcherScript, AIX_USER, AIX_HOST, keyPath, LOCAL_SYNC_DIR]);
                 pyProc.stdout.on('data', data => console.log(`Watcher: ${data}`));
                 pyProc.stderr.on('data', err => console.error(`Watcher error: ${err}`));
 
-                // Step 4: Save config
                 saveConfig(context, value);
-
-                // Step 5: Open VS Code in mount dir
-                try {
-                    // await exec(`code --folder-uri "${mount_dir}"`);
-                    const helperPath = "/Users/kushalverma/Documents/AIX/Extension/helper";
-                    await exec(`code --extensionDevelopmentPath="${helperPath}" "${mount_dir}"`);
-
-                } catch (err) {
-                    vscode.window.showErrorMessage(`Failed to open VS Code in ${mount_dir}`);
-                }
-
                 vscode.window.showInformationMessage(`Mounted: ${value}`);
             } catch (err) {
                 vscode.window.showErrorMessage(`Mount failed: ${err.message}`);
@@ -213,23 +289,24 @@ function runExpect(userHost, keyPath, password) {
         child.stderr.on('data', data => console.error(`expect error: ${data}`));
 
         child.on('close', (code) => {
-            if (code === 0) {
-                resolve();
-            } else if (code === 1) {
+            if (code === 0) resolve();
+            else if (code === 1) {
                 console.warn('Expect exited with code 1 — likely key already exists, continuing...');
-                resolve(); // Treat as success
-            } else {
-                reject(new Error(`Expect failed with code ${code}`));
-            }
+                resolve();
+            } else reject(new Error(`Expect failed with code ${code}`));
         });
     });
 }
 
-
 function deactivate() {
-    if (syncedFilePath && fs.existsSync(syncedFilePath)) {
-        fs.unlinkSync(syncedFilePath);
+    try {
+        fs.rmSync(TEMP_DIR, { recursive: true, force: true });
+        console.log(`Temp folder ${TEMP_DIR} deleted`);
+    } catch (err) {
+        console.error(`Failed to delete temp folder: ${err.message}`);
     }
 }
+
+
 
 module.exports = { activate, deactivate };
