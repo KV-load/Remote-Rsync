@@ -17,6 +17,8 @@ let keyPath = '';
 let localtoRemote = new Map();
 let TEMP_DIR = '';
 let ssh_terminal = '';
+let watcherScript = '';
+let safeCode ='';
 
 const Client = require('ssh2-sftp-client')
 
@@ -59,9 +61,16 @@ class AixFSProvider {
             this._lastModified.set(remotePath, stat.modifyTime);
 
             return fs.readFileSync(preview_localPath); // Buffer for VS Code API
-        } catch (err) {
-            throw new Error(`readFile failed for ${remotePath}: ${err.message}`);
+        }  catch (err) {
+        // If file not found on remote, create empty file locally
+        if (err.code === 2 || /No such file/i.test(err.message)) {
+            fs.writeFileSync(preview_localPath, ""); // create empty file
+            fs.writeFileSync(localPath, "");
+            return Buffer.from(""); // return empty buffer to VS Code
         }
+
+        throw new Error(`readFile failed for ${remotePath}: ${err.message}`);
+    }
     }
 
     async writeFile(uri, content, options) {
@@ -169,6 +178,8 @@ function activate(context) {
             vscode.commands.executeCommand('vscode.open', vfsUri);
         });
     }
+
+    
 });
 
 
@@ -250,12 +261,59 @@ function startWatcher(watcherScript) {
 }
 
 
+async function Boot(userHost) {
+    try {
+        // Start your watcher
+        const { port, process: pyProc } = await startWatcher(watcherScript);
+
+        console.log("Now safe to continue. Using port:", port);
+
+        // Replace placeholder with port
+        let finalSafeCode = safeCode.replace('VS_PORT', port);
+
+        // Build SSH heredoc
+        const sshCmd = `
+ssh -i ${keyPath} -o StrictHostKeyChecking=no ${userHost} 'bash -s' <<'EOF'
+# Overwrite old code() function first
+if grep -q '^[[:space:]]*code() {' ~/.bashrc; then
+    sed -i "/^[[:space:]]*code() {/,/^[[:space:]]*}/d" ~/.bashrc
+fi
+
+# Append the new function safely
+cat <<'EOC' >> ~/.bashrc
+${finalSafeCode}
+EOC
+EOF`;
+
+        // Execute the heredoc injection
+        await exec(sshCmd);
+
+        // Create (or reuse) a VS Code terminal
+        if (!globalThis.rsyncTerminal || globalThis.rsyncTerminal.exitStatus) {
+            globalThis.rsyncTerminal = vscode.window.createTerminal({ name: "RSync Terminal" });
+        }
+        const terminal = globalThis.rsyncTerminal;
+
+        terminal.show();
+
+        // Send reverse SSH tunnel command
+        const forwardCmd = `ssh -R ${port}:localhost:${port} -i ${keyPath} -o StrictHostKeyChecking=no ${userHost}`;
+        terminal.sendText(forwardCmd, true);
+
+        console.log("Boot sequence finished.");
+    } catch (err) {
+        console.error("Failed to start Boot:", err);
+    }
+}
+
+
+
 
 async function mountSSHFS(context, value, mount_dir) {
     const [userHost, remotePath = '/'] = value.split(':');
     keyPath = `${process.env.HOME}/.ssh/id_rsa_${AIX_HOST}`;
     const code_bash = fs.readFileSync(path.join(__dirname, 'code.sh'), 'utf8');
-    let safeCode = code_bash
+    safeCode = code_bash
         .replace(/"/g, '\"')
         .replace(/'/g, "\'")
         .replace(/\$/g, '\$');
@@ -282,7 +340,7 @@ async function mountSSHFS(context, value, mount_dir) {
                 }
             
 
-                const watcherScript = path.join(__dirname, 'socket_watcher.py');
+                 watcherScript = path.join(__dirname, 'socket_watcher.py');
                 if (!fs.existsSync(watcherScript)) {
                     vscode.window.showErrorMessage('Watcher script not found');
                     return;
@@ -290,45 +348,7 @@ async function mountSSHFS(context, value, mount_dir) {
 
                  // port no it is listening to 
 
-                 (async () => {
-                        try {
-                            const { port, process: pyProc } = await startWatcher(watcherScript);
-
-                            console.log("Now safe to continue. Using port:", port);
-
-                            safeCode = safeCode.replace('VS_PORT',port);
-
-                            // Build the full SSH heredoc as a single string
-const sshCmd = `
-ssh -i ${keyPath} -o StrictHostKeyChecking=no ${userHost} 'bash -s' <<'EOF'
-# Overwrite old code() function first
-if grep -q '^[[:space:]]*code() {' ~/.bashrc; then
-    sed -i "/^[[:space:]]*code() {/,/^[[:space:]]*}/d" ~/.bashrc
-fi
-
-# Append the new function safely
-cat <<'EOC' >> ~/.bashrc
-${safeCode}
-EOC
-EOF`;
-
-
-                            await exec(sshCmd);
-
-                            // creating a terminal with each session
-                            const terminal = vscode.window.createTerminal({ name: "RSync Terminal" });
-                            terminal.show();
-
-                            const forwardCmd = `ssh -R ${port}:localhost:${port} -i ${keyPath} -o StrictHostKeyChecking=no ${userHost}`;
-                            // terminal.sendText(sshCmd,false);
-                            terminal.sendText(forwardCmd, true);
-
-                            // 👉 rest of your code here, watcher keeps running in background
-                        } catch (err) {
-                            console.error("Failed to start watcher:", err);
-                        }
-                    })();
-
+                 await Boot(userHost);
               
 
                 
