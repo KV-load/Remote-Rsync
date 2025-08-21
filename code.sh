@@ -6,6 +6,12 @@ code() {
         *)  ABS="$(cd "$(dirname "$FILE")" && pwd)/$(basename "$FILE")" ;;
     esac
 
-    : > ~/.sshfs/command.txt
-    echo "$ABS" >> ~/.sshfs/command.txt
+      python - "$ABS" <<'PYEND'
+import socket, sys, os
+s = socket.socket()
+s.connect(("localhost", VS_PORT))  # Uses env var PORT
+s.send((sys.argv[1] + "\n").encode())
+s.close()
+PYEND
+
 }
