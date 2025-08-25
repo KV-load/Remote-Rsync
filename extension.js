@@ -1,5 +1,3 @@
-
-
 const util = require('util');
 const exec = util.promisify(require('child_process').exec);
 const spawn = require('child_process').spawn;
@@ -65,7 +63,6 @@ class AixFSProvider {
         // If file not found on remote, create empty file locally
         if (err.code === 2 || /No such file/i.test(err.message)) {
             fs.writeFileSync(preview_localPath, ""); // create empty file
-            fs.writeFileSync(localPath, "");
             return Buffer.from(""); // return empty buffer to VS Code
         }
 
@@ -142,21 +139,21 @@ function activate(context) {
             ...logins.map(login => ({ label: login })),
             { label: 'Enter new login', alwaysShow: true }
         ];
-        const selected = await vscode.window.showQuickPick(quickPickItems, { placeHolder: 'Select a saved login or enter a new one' });
+        const selected = await vscode.window.showQuickPick(quickPickItems,{ placeHolder: 'Select a saved login or enter a new one' ,ignoreFocusOut: true});
         if (!selected) return;
 
         let value = selected.label;
         if (value === 'Enter new login') {
-            const input = await vscode.window.showInputBox({ prompt: 'Enter username@ip_address:/' });
+            const input = await vscode.window.showInputBox({ prompt: 'Enter username@ip_address:/' ,ignoreFocusOut: true});
             if (!input) return;
             value = input;
         }
+    
 
         [AIX_USER, AIX_HOST] = value.split('@');
-        await mountSSHFS(context, value, mount_dir);
+        await mountSSHFS(context, value, mount_dir,logins);
 
        TEMP_DIR = path.join(mount_dir, `temp_${AIX_HOST}`);
-       fs.mkdirSync(TEMP_DIR, { recursive: true });
 
         // Register the virtual file system provider for aix:
         const provider = new AixFSProvider(AIX_USER, AIX_HOST, keyPath,TEMP_DIR);
@@ -286,7 +283,7 @@ EOC
 EOF`;
 
         // Execute the heredoc injection
-        await exec(sshCmd);
+        await exec(sshCmd,{env: process.env});
 
         // Create (or reuse) a VS Code terminal
         if (!globalThis.rsyncTerminal || globalThis.rsyncTerminal.exitStatus) {
@@ -303,14 +300,27 @@ EOF`;
         console.log("Boot sequence finished.");
     } catch (err) {
         console.error("Failed to start Boot:", err);
+        throw err;
     }
 }
 
 
 
 
-async function mountSSHFS(context, value, mount_dir) {
+async function mountSSHFS(context, value, mount_dir,logins) {
     const [userHost, remotePath = '/'] = value.split(':');
+
+    // checking if the server exists or not.
+    try{
+     await exec(`ssh ${value}`)
+    }
+    catch(err){
+ 
+        if(err.message.includes("Could not resolve hostname")){
+        return;
+    }
+}
+
     keyPath = `${process.env.HOME}/.ssh/id_rsa_${AIX_HOST}`;
     const code_bash = fs.readFileSync(path.join(__dirname, 'code.sh'), 'utf8');
     safeCode = code_bash
@@ -318,46 +328,72 @@ async function mountSSHFS(context, value, mount_dir) {
         .replace(/'/g, "\'")
         .replace(/\$/g, '\$');
 
-    if (!fs.existsSync(keyPath)) {
+    // Always prompt for password if key exists but remote access fails
+    let needKeyInstall = false;
+    // Try a test SSH connection using the key
+
+    if (fs.existsSync(keyPath)) {
+
+        try {
+            await exec(`ssh -i ${keyPath} -o BatchMode=yes -o StrictHostKeyChecking=no ${userHost} "echo connected"`);
+            console.log('SSH key works, no need to reinstall'); 
+        } catch (err) {
+
+            // If permission denied, we need to reinstall the key
+            if (/Permission denied/.test(err.stderr || err.message)) {
+                console.log('SSH key did not work, will reinstall');
+                await exec(`yes y | ssh-keygen -t rsa -b 4096 -f ${keyPath} -N ""`);
+                needKeyInstall = true;
+            }
+        }
+    } else {
+        // Key doesn't exist, need to generate and install
         await exec(`ssh-keygen -t rsa -b 4096 -f ${keyPath} -N ""`);
+        needKeyInstall = true;
     }
 
-    const password = await vscode.window.showInputBox({
+    let password = '';
+
+    if(needKeyInstall ) {
+        vscode.window.showErrorMessage(`Initial SSH connection failed:`);
+
+    password = await vscode.window.showInputBox({
         prompt: `Enter password for ${userHost}`,
         password: true
     });
     if (!password) return;
+}
 
     await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: `Mounting ${value}...` },
         async () => {
             try {
-                if(!fs.existsSync(keyPath)) {
-                await runExpect(userHost, keyPath, password);
-                vscode.window.showInformationMessage(`SSH key copied to ${userHost}`);
-                } else {
-                vscode.window.showInformationMessage(`SSH key already exists at ${keyPath}`);
-                }
-            
+                if (needKeyInstall) {
+                    // Optionally, regenerate the key if you want to always refresh
+                    // await exec(`ssh-keygen -t rsa -b 4096 -f ${keyPath} -N ""`);
 
-                 watcherScript = path.join(__dirname, 'socket_watcher.py');
+                    await runExpect(userHost, keyPath, password);
+                    vscode.window.showInformationMessage(`SSH key copied to ${userHost}`);
+                } else {
+                    vscode.window.showInformationMessage(`SSH key already exists at ${keyPath} and works`);
+                }
+
+                watcherScript = path.join(__dirname, 'socket_watcher.py');
                 if (!fs.existsSync(watcherScript)) {
                     vscode.window.showErrorMessage('Watcher script not found');
                     return;
                 }
-
-                 // port no it is listening to 
-
-                 await Boot(userHost);
-              
-
-                
-               
-
+      
+                await Boot(userHost);
+  
+                //setting up the base setup 
                 saveConfig(context, value);
+               fs.mkdirSync(TEMP_DIR, { recursive: true });
+
                 vscode.window.showInformationMessage(`Mounted: ${value}`);
             } catch (err) {
                 vscode.window.showErrorMessage(`Mount failed: ${err.message}`);
+                return;
             }
         }
     );
