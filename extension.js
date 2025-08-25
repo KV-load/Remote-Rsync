@@ -153,7 +153,6 @@ function activate(context) {
         [AIX_USER, AIX_HOST] = value.split('@');
         await mountSSHFS(context, value, mount_dir,logins);
 
-       TEMP_DIR = path.join(mount_dir, `temp_${AIX_HOST}`);
 
         // Register the virtual file system provider for aix:
         const provider = new AixFSProvider(AIX_USER, AIX_HOST, keyPath,TEMP_DIR);
@@ -286,10 +285,7 @@ EOF`;
         await exec(sshCmd,{env: process.env});
 
         // Create (or reuse) a VS Code terminal
-        if (!globalThis.rsyncTerminal || globalThis.rsyncTerminal.exitStatus) {
-            globalThis.rsyncTerminal = vscode.window.createTerminal({ name: "RSync Terminal" });
-        }
-        const terminal = globalThis.rsyncTerminal;
+        const terminal = vscode.window.createTerminal({ name: "RSync Terminal" });
 
         terminal.show();
 
@@ -388,7 +384,9 @@ async function mountSSHFS(context, value, mount_dir,logins) {
   
                 //setting up the base setup 
                 saveConfig(context, value);
-               fs.mkdirSync(TEMP_DIR, { recursive: true });
+                 TEMP_DIR = path.join(mount_dir, `temp_${AIX_HOST}`);
+
+                fs.mkdirSync(TEMP_DIR, { recursive: true });
 
                 vscode.window.showInformationMessage(`Mounted: ${value}`);
             } catch (err) {
