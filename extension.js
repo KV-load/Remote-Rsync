@@ -6,17 +6,47 @@ const path = require('path');
 const vscode = require('vscode');
 const chokidar = require('chokidar');
 
-let LOCAL_COMMAND_FILE = '';
+
+
+// Global map to store all server instances
+const Servers = new Map();
+
+
+// common to all servers
 let LOCAL_SYNC_DIR = '';
-let AIX_USER = '';
-let AIX_HOST = '';
 let mount_dir = '';
-let keyPath = '';
-let localtoRemote = new Map();
-let TEMP_DIR = '';
-let ssh_terminal = '';
 let watcherScript = '';
 let safeCode ='';
+
+class Server
+{
+    constructor(LOCAL_COMMAND_FILE,AIX_HOST,AIX_USER,TEMP_DIR)
+    {
+        this.LOCAL_COMMAND_FILE = LOCAL_COMMAND_FILE;
+        this.AIX_HOST = AIX_HOST;
+        this.AIX_USER = AIX_USER;
+        this.TEMP_DIR = TEMP_DIR;
+        this.localtoRemote = new Map();
+    }
+
+    updateLocalToRemote(remotePath,fileName)
+    {
+        this.localtoRemote.set(fileName,remotePath);
+        fs.writeFileSync(path.join(this.TEMP_DIR,`${this.AIX_HOST}_files.json`),JSON.stringify(this.localtoRemote));
+
+    }
+
+
+    CreatingTempDir()
+    {
+        fs.mkdirSync(this.TEMP_DIR, { recursive: true });
+    }
+
+    Setkeypath(keyPath)
+    {
+        this.keyPath = keyPath;
+    }
+}
 
 const Client = require('ssh2-sftp-client')
 
@@ -130,9 +160,20 @@ class AixFSProvider {
 
 function activate(context) {
     const disposable = vscode.commands.registerCommand('remote-rsync.helloWorld', async function () {
+
+       //defining variables here
+        let LOCAL_COMMAND_FILE = '';
+        let AIX_USER = '';
+        let AIX_HOST = '';
+        let localtoRemote = new Map();
+        let TEMP_DIR = '';
+
+
         mount_dir = vscode.workspace.workspaceFolders[0].uri.fsPath;
         fs.mkdirSync(path.join(mount_dir, '.sshfs'), { recursive: true });
         LOCAL_SYNC_DIR = path.join(mount_dir, '.sshfs');
+        
+
 
         const logins = loadconfig(context) || [];
         const quickPickItems = [
@@ -148,14 +189,20 @@ function activate(context) {
             if (!input) return;
             value = input;
         }
-    
-
+        
+        value = value.trim(); // removing unnecessary spaces
         [AIX_USER, AIX_HOST] = value.split('@');
-        await mountSSHFS(context, value, mount_dir,logins);
+        TEMP_DIR = path.join(mount_dir, `temp_${AIX_HOST}`);
+        LOCAL_COMMAND_FILE = path.join(LOCAL_SYNC_DIR, `command_${AIX_HOST}.txt`);
+        
 
+        let Remote_server = new Server(LOCAL_COMMAND_FILE,AIX_HOST,AIX_USER,TEMP_DIR);
+        await mountSSHFS(context, value, mount_dir,logins,Remote_server);
+      
+        Servers.set(AIX_HOST, Remote_server);
 
         // Register the virtual file system provider for aix:
-        const provider = new AixFSProvider(AIX_USER, AIX_HOST, keyPath,TEMP_DIR);
+        const provider = new AixFSProvider(AIX_USER, AIX_HOST, Remote_server.keyPath,TEMP_DIR);
         context.subscriptions.push(
             vscode.workspace.registerFileSystemProvider(`aix_${AIX_HOST}`, provider, { isCaseSensitive: true })
         );
@@ -179,27 +226,26 @@ function activate(context) {
 });
 
 
-        watchCommandFile();
+        watchCommandFile(Remote_server);
     });
 
     context.subscriptions.push(disposable);
 }
 
-function watchCommandFile() {
-    LOCAL_COMMAND_FILE = path.join(LOCAL_SYNC_DIR, `command_${AIX_HOST}.txt`);
+function watchCommandFile(Remote_server) {
 
-    chokidar.watch(LOCAL_COMMAND_FILE).on('change', () => {
-        const target = fs.readFileSync(LOCAL_COMMAND_FILE, 'utf8').trim();
-        if (target) pullFromAix(target);
+    chokidar.watch(Remote_server.LOCAL_COMMAND_FILE).on('change', () => {
+        const target = fs.readFileSync(Remote_server.LOCAL_COMMAND_FILE, 'utf8').trim();
+        if (target) pullFromAix(target,Remote_server);
     });
 }
 
-async function pullFromAix(remotePath) {
+async function pullFromAix(remotePath,Remote_server) {
     remotePath = path.posix.normalize(remotePath);
-    localtoRemote.set(path.basename(remotePath),remotePath);
-    fs.writeFileSync(path.join(TEMP_DIR,`${AIX_HOST}_files.json`),JSON.stringify(localtoRemote));
+    Remote_server.updateLocalToRemote(remotePath,path.basename(remotePath));
+    fs.writeFileSync(path.join(Remote_server.TEMP_DIR,`${Remote_server.AIX_HOST}_files.json`),JSON.stringify(Remote_server.localtoRemote));
 
-    const uri = vscode.Uri.parse(`aix_${AIX_HOST}:${remotePath}`);
+    const uri = vscode.Uri.parse(`aix_${Remote_server.AIX_HOST}:${remotePath}`);
     const doc = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
 }
@@ -223,11 +269,11 @@ function loadconfig(context) {
     return [];
 }
 
-function startWatcher(watcherScript) {
+function startWatcher(watcherScript,Remote_server) {
     return new Promise((resolve, reject) => {
         fs.chmodSync(watcherScript, "755");
 
-        const pyProc = spawn("python3", [watcherScript,path.join(LOCAL_SYNC_DIR,`command_${AIX_HOST}.txt`)], {
+        const pyProc = spawn("python3", [watcherScript,path.join(LOCAL_SYNC_DIR,`command_${Remote_server.AIX_HOST}.txt`)], {
             detached: true,   // allows it to keep running in background
             stdio: ["ignore", "pipe", "pipe"]
         });
@@ -257,10 +303,10 @@ function startWatcher(watcherScript) {
 }
 
 
-async function Boot(userHost) {
+async function Boot(userHost,Remote_server) {
     try {
         // Start your watcher
-        const { port, process: pyProc } = await startWatcher(watcherScript);
+        const { port, process: pyProc } = await startWatcher(watcherScript,Remote_server);
 
         console.log("Now safe to continue. Using port:", port);
 
@@ -269,7 +315,7 @@ async function Boot(userHost) {
 
         // Build SSH heredoc
         const sshCmd = `
-ssh -i ${keyPath} -o StrictHostKeyChecking=no ${userHost} 'bash -s' <<'EOF'
+ssh -i ${Remote_server.keyPath} -o StrictHostKeyChecking=no ${userHost} 'bash -s' <<'EOF'
 # Overwrite old code() function first
 if grep -q '^[[:space:]]*code() {' ~/.bashrc; then
     sed -i "/^[[:space:]]*code() {/,/^[[:space:]]*}/d" ~/.bashrc
@@ -282,7 +328,7 @@ EOC
 EOF`;
 
         // Execute the heredoc injection
-        await exec(sshCmd,{env: process.env});
+        await exec(sshCmd,{env: process.env}); // so that at the remote we pass all SSH_AUTH_SOCK env etc to get agent forwarding.
 
         // Create (or reuse) a VS Code terminal
         const terminal = vscode.window.createTerminal({ name: "RSync Terminal" });
@@ -290,7 +336,7 @@ EOF`;
         terminal.show();
 
         // Send reverse SSH tunnel command
-        const forwardCmd = `ssh -R ${port}:localhost:${port} -i ${keyPath} -o StrictHostKeyChecking=no ${userHost}`;
+        const forwardCmd = `ssh -R ${port}:localhost:${port} -i ${Remote_server.keyPath} -o StrictHostKeyChecking=no ${userHost}`;
         terminal.sendText(forwardCmd, true);
 
         console.log("Boot sequence finished.");
@@ -303,21 +349,29 @@ EOF`;
 
 
 
-async function mountSSHFS(context, value, mount_dir,logins) {
+async function mountSSHFS(context, value, mount_dir,logins,Remote_server) {
     const [userHost, remotePath = '/'] = value.split(':');
 
     // checking if the server exists or not.
+
     try{
      await exec(`ssh ${value}`)
     }
     catch(err){
  
         if(err.message.includes("Could not resolve hostname")){
+
         return;
     }
+
+
 }
 
-    keyPath = `${process.env.HOME}/.ssh/id_rsa_${AIX_HOST}`;
+
+    let keyPath = `${process.env.HOME}/.ssh/id_rsa_${Remote_server.AIX_HOST}`;
+    Remote_server.Setkeypath(keyPath);
+
+
     const code_bash = fs.readFileSync(path.join(__dirname, 'code.sh'), 'utf8');
     safeCode = code_bash
         .replace(/"/g, '\"')
@@ -327,13 +381,15 @@ async function mountSSHFS(context, value, mount_dir,logins) {
     // Always prompt for password if key exists but remote access fails
     let needKeyInstall = false;
     // Try a test SSH connection using the key
+        vscode.window.showInformationMessage(`Connecting  ${fs.existsSync(keyPath)} to ${value}...`);
+
 
     if (fs.existsSync(keyPath)) {
-
         try {
             await exec(`ssh -i ${keyPath} -o BatchMode=yes -o StrictHostKeyChecking=no ${userHost} "echo connected"`);
             console.log('SSH key works, no need to reinstall'); 
         } catch (err) {
+        vscode.window.showErrorMessage(`Initial SSH connection failed:`);
 
             // If permission denied, we need to reinstall the key
             if (/Permission denied/.test(err.stderr || err.message)) {
@@ -343,8 +399,8 @@ async function mountSSHFS(context, value, mount_dir,logins) {
             }
         }
     } else {
-        // Key doesn't exist, need to generate and install
-        await exec(`ssh-keygen -t rsa -b 4096 -f ${keyPath} -N ""`);
+        vscode.window.showInformationMessage(`Connecting  ${keyPath} to ${value}...`);
+        await exec(`yes y | ssh-keygen -t rsa -b 4096 -f ${keyPath} -N ""`);
         needKeyInstall = true;
     }
 
@@ -380,13 +436,13 @@ async function mountSSHFS(context, value, mount_dir,logins) {
                     return;
                 }
       
-                await Boot(userHost);
+                await Boot(userHost,Remote_server);
   
                 //setting up the base setup 
                 saveConfig(context, value);
-                 TEMP_DIR = path.join(mount_dir, `temp_${AIX_HOST}`);
-
-                fs.mkdirSync(TEMP_DIR, { recursive: true });
+             
+                // creating temp dir for this server
+                Remote_server.CreatingTempDir();
 
                 vscode.window.showInformationMessage(`Mounted: ${value}`);
             } catch (err) {
@@ -416,12 +472,14 @@ function runExpect(userHost, keyPath, password) {
 }
 
 function deactivate() {
+    for (const [host, server] of Servers) {
     try {
-        fs.rmSync(TEMP_DIR, { recursive: true, force: true });
-        console.log(`Temp folder ${TEMP_DIR} deleted`);
+        fs.rmSync(server.TEMP_DIR, { recursive: true, force: true });
+        console.log(`Temp folder ${server.TEMP_DIR} deleted`);
     } catch (err) {
         console.error(`Failed to delete temp folder: ${err.message}`);
     }
+}
 }
 
 
