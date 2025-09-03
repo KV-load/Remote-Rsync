@@ -6,6 +6,55 @@ const path = require('path');
 const vscode = require('vscode');
 const chokidar = require('chokidar');
 
+const {Cscope} = require('./cscope');
+
+// Handling downtime and restart the servers
+class ServerReload {
+    constructor(context, restartFunc) {
+        this.context = context;
+        this.restartFunc = restartFunc;
+
+        // load servers from state
+        const stored = context.globalState.get("connectedServers") || [];
+        this.servers = stored.map(obj => Server.fromJSON(obj));
+    }
+
+    getAll() {
+        return this.servers;
+    }
+
+    async restartAll() {
+        for (const server of this.servers) {
+            const value = `${server.AIX_USER}@${server.AIX_HOST}:`;
+            try {
+                await this.restartFunc(this.context, value, server);
+                console.log(`Restarted server ${value}`);
+            } catch (err) {
+                console.error(`Failed to restart ${value}`, err);
+            }
+        }
+    }
+
+    async add(server) {
+        this.servers.push(server);
+        await this.context.globalState.update(
+            "connectedServers",
+            this.servers.map(s => s.toJSON())
+        );
+    }
+
+    async remove(server) {
+        this.servers = this.servers.filter(
+            s => !(s.AIX_USER === server.AIX_USER && s.AIX_HOST === server.AIX_HOST)
+        );
+        await this.context.globalState.update(
+            "connectedServers",
+            this.servers.map(s => s.toJSON())
+        );
+    }
+}
+
+
 
 
 // Global map to store all server instances
@@ -36,6 +85,10 @@ class Server
 
     }
 
+    SetPort(port)
+    {
+        this.port = port;
+    }
 
     CreatingTempDir()
     {
@@ -45,6 +98,27 @@ class Server
     Setkeypath(keyPath)
     {
         this.keyPath = keyPath;
+    }
+
+      // --- NEW: serialize/deserialize helpers ---
+    toJSON() {
+        return {
+            LOCAL_COMMAND_FILE: this.LOCAL_COMMAND_FILE,
+            AIX_HOST: this.AIX_HOST,
+            AIX_USER: this.AIX_USER,
+            TEMP_DIR: this.TEMP_DIR,
+            port: this.port,
+            keyPath: this.keyPath,
+            localtoRemote: [...this.localtoRemote]
+        };
+    }
+
+    static fromJSON(obj) {
+        const s = new Server(obj.LOCAL_COMMAND_FILE, obj.AIX_HOST, obj.AIX_USER, obj.TEMP_DIR);
+        s.port = obj.port;
+        s.keyPath = obj.keyPath;
+        s.localtoRemote = new Map(obj.localtoRemote || []);
+        return s;
     }
 }
 
@@ -89,16 +163,51 @@ class AixFSProvider {
             this._lastModified.set(remotePath, stat.modifyTime);
 
             return fs.readFileSync(preview_localPath); // Buffer for VS Code API
-        }  catch (err) {
-        // If file not found on remote, create empty file locally
+        }  
+         catch (err) {
+        // If file not found, return empty
         if (err.code === 2 || /No such file/i.test(err.message)) {
-            fs.writeFileSync(preview_localPath, ""); // create empty file
-            return Buffer.from(""); // return empty buffer to VS Code
+            fs.writeFileSync(preview_localPath, "");
+            return Buffer.from("");
         }
 
-        throw new Error(`readFile failed for ${remotePath}: ${err.message}`);
+        try {
+            // Try resolving symlinks
+            let stats = await this.sftp.stat(remotePath);
+            let new_remotePath = remotePath;
+
+            if ((stats.mode & 0o170000) !== 0o100000) {
+                console.log(`Resolving ${remotePath} (not a regular file)`);
+                new_remotePath = await this.sftp.realPath(remotePath);
+                stats = await this.sftp.stat(new_remotePath);
+            }
+
+            if ((stats.mode & 0o170000) === 0o100000) {
+                // Regular file → fastGet
+                await this.sftp.fastGet(new_remotePath, preview_localPath);
+                fs.copyFileSync(preview_localPath, localPath);
+                this._lastModified.set(remotePath, stats.modifyTime);
+                return fs.readFileSync(preview_localPath);
+            } else {
+                // 🚨 Not a regular file, final fallback → use SSH cat
+                console.log(`Falling back to remote cat for ${remotePath}`);
+                const { stdout, stderr } = await exec(
+                    `ssh -i ${this.keyPath} ${this.aixUser}@${this.aixHost} "cat ${new_remotePath}"`
+                );
+
+                if (stderr && stderr.trim()) {
+                    throw new Error(`cat failed: ${stderr}`);
+                }
+                fs.writeFileSync(preview_localPath, stdout);
+                fs.copyFileSync(preview_localPath, localPath);
+                return fs.readFileSync(preview_localPath);
+            }
+        } catch (innerErr) {
+            console.error(`Failed to resolve/fetch ${remotePath}: ${innerErr.message}`);
+            throw new Error(`readFile failed for ${remotePath}: ${innerErr.message}`);
+        }
     }
-    }
+}
 
     async writeFile(uri, content, options) {
         await this._connectPromise;
@@ -117,6 +226,7 @@ class AixFSProvider {
 
             this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
         } catch (err) {
+
             throw new Error(`writeFile failed for ${remotePath}: ${err.message}`);
         }
     }
@@ -159,13 +269,23 @@ class AixFSProvider {
 
 
 function activate(context) {
+    //To defined it globally so that disposable can use .
     const disposable = vscode.commands.registerCommand('remote-rsync.helloWorld', async function () {
 
+        // Creating an reload_Manager instance
+        const reloadManager = new ServerReload(context, mountSSHFS);
+        
+        // Restart all servers on activation
+        reloadManager.restartAll().then(() => {
+            console.log("All servers restarted");
+        }).catch(err => {
+            console.error("Failed to restart servers:", err);
+        });
+        
        //defining variables here
         let LOCAL_COMMAND_FILE = '';
         let AIX_USER = '';
         let AIX_HOST = '';
-        let localtoRemote = new Map();
         let TEMP_DIR = '';
 
 
@@ -196,10 +316,18 @@ function activate(context) {
         LOCAL_COMMAND_FILE = path.join(LOCAL_SYNC_DIR, `command_${AIX_HOST}.txt`);
         
 
-        let Remote_server = new Server(LOCAL_COMMAND_FILE,AIX_HOST,AIX_USER,TEMP_DIR);
-        await mountSSHFS(context, value, mount_dir,logins,Remote_server);
+
+          let Remote_server = new Server(LOCAL_COMMAND_FILE,AIX_HOST,AIX_USER,TEMP_DIR);
+
+        await mountSSHFS(context, value,Remote_server);  //Setting up the server
+
       
         Servers.set(AIX_HOST, Remote_server);
+
+
+     
+        reloadManager.add(Remote_server); // For reloading of the server when refresh or server is lost
+        
 
         // Register the virtual file system provider for aix:
         const provider = new AixFSProvider(AIX_USER, AIX_HOST, Remote_server.keyPath,TEMP_DIR);
@@ -208,35 +336,115 @@ function activate(context) {
         );
 
         // for the case when we load the files from local temp
-     vscode.workspace.onDidOpenTextDocument(doc => {
+vscode.workspace.onDidOpenTextDocument(async doc => {
     const filePath = doc.uri.fsPath;
+
+    // Only intercept TEMP files, not VFS URIs
     if (filePath.startsWith(TEMP_DIR)) {
         const fileName = path.basename(filePath);
-        const remotePath = localtoRemote.get(fileName);
+        const remotePath = Remote_server.localtoRemote.get(fileName);
         const vfsUri = vscode.Uri.parse(`aix_${AIX_HOST}:${remotePath}`);
 
-        // Close the local one
-        vscode.commands.executeCommand('workbench.action.closeActiveEditor').then(() => {
-            // Open the VFS one instead
-            vscode.commands.executeCommand('vscode.open', vfsUri);
-        });
+        // Defer to let VSCode finish opening first
+       setTimeout(async () => {
+    // Find the editor showing this TEMP file
+    const editor = vscode.window.visibleTextEditors.find(e => e.document.uri.fsPath === filePath);
+    if (editor) {
+        await vscode.window.showTextDocument(editor.document); // make it active
+        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
     }
 
-    
+    // Now open the VFS one
+    const file = await vscode.workspace.openTextDocument(vfsUri);
+    await vscode.window.showTextDocument(file, { preview: true, preserveFocus: false });
+}, 50);
+
+    }
 });
+
+
+
+       // Checking if the terminal is connected or not
+    //    vscode.window.onDidCloseTerminal((closedTerminal) => {
+    //     if (closedTerminal.name === `${Remote_server.AIX_HOST}_Terminal`) {
+    //         TerminalLoader(value,Remote_server);
+    //         vscode.window.showWarningMessage(`Terminal for ${Remote_server.AIX_HOST} closed. Please restart the extension to reconnect.`);
+    //     }
+    // });
+
+
 
 
         watchCommandFile(Remote_server);
     });
 
+
+
+
+    let disposable2 = vscode.commands.registerCommand("AIX_Terminals", async function() {
+    // Turn the Servers map into QuickPick items
+    const term_quickPickItems = Array.from(Servers.entries()).map(([host, server]) => ({
+        label: host,   // shown in QuickPick
+        description: server.TEMP_DIR || '' // optional: show extra info
+    }));
+
+    if (term_quickPickItems.length === 0) {
+        vscode.window.showErrorMessage("No active servers available");
+        return;
+    }
+
+    const selected = await vscode.window.showQuickPick(term_quickPickItems, {
+        placeHolder: 'Select a connected server',
+        ignoreFocusOut: true
+    });
+    if (!selected) return;
+
+    const chosenHost = selected.label;
+    const chosenServer = Servers.get(chosenHost);
+
+    vscode.window.showInformationMessage(chosenHost," ");
+
+    if (!chosenServer) {
+        vscode.window.showErrorMessage(`No active server found for ${chosenHost}`);
+        return;
+    }
+
+    Boot(`${chosenServer.AIX_USER}@${chosenHost}`, chosenServer);
+});
+
+
     context.subscriptions.push(disposable);
+    context.subscriptions.push(disposable2);
 }
+
+
+
 
 function watchCommandFile(Remote_server) {
 
     chokidar.watch(Remote_server.LOCAL_COMMAND_FILE).on('change', () => {
-        const target = fs.readFileSync(Remote_server.LOCAL_COMMAND_FILE, 'utf8').trim();
-        if (target) pullFromAix(target,Remote_server);
+        let target = fs.readFileSync(Remote_server.LOCAL_COMMAND_FILE, 'utf8').trim();
+        let dir = '';
+        let newtarget = '';
+        let size = "";
+        if(target && target.includes('::'))
+        {
+            newtarget = target.split('::')[1].trim();
+            size  = newtarget.split('@')[1].trim();
+            newtarget = newtarget.split('@')[0].trim();
+            dir = target.split('::')[0].trim();
+            pullFromAix(newtarget,Remote_server);
+
+            dir = target.split('::')[0].trim();
+            Cscope(Remote_server,dir,mount_dir);
+
+
+        }
+        else if (target) {
+            newtarget = target.split('@')[0].trim();
+            size  = target.split('@')[1].trim();
+            pullFromAix(newtarget,Remote_server);
+        }
     });
 }
 
@@ -303,6 +511,21 @@ function startWatcher(watcherScript,Remote_server) {
 }
 
 
+function TerminalLoader(userHost,Remote_server)
+{
+     // Create (or reuse) a VS Code terminal
+        const terminal = vscode.window.createTerminal({ name: `${Remote_server.AIX_HOST}_Terminal` });
+
+        terminal.show();
+
+        // Send reverse SSH tunnel command
+        const forwardCmd = `ssh -R ${Remote_server.port}:localhost:${Remote_server.port} -i ${Remote_server.keyPath} \
+  -o StrictHostKeyChecking=no \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=3 ${userHost}`;
+        terminal.sendText(forwardCmd, true);
+
+}
+
 async function Boot(userHost,Remote_server) {
     try {
         // Start your watcher
@@ -314,15 +537,12 @@ async function Boot(userHost,Remote_server) {
         let finalSafeCode = safeCode.replace('VS_PORT', port);
 
         // Build SSH heredoc
-        const sshCmd = `
+const sshCmd = `
 ssh -i ${Remote_server.keyPath} -o StrictHostKeyChecking=no ${userHost} 'bash -s' <<'EOF'
-# Overwrite old code() function first
-if grep -q '^[[:space:]]*code() {' ~/.bashrc; then
-    sed -i "/^[[:space:]]*code() {/,/^[[:space:]]*}/d" ~/.bashrc
+if grep '^[[:space:]]*code[[:space:]]*\(\)[[:space:]]*{' "$HOME/.bashrc"; then
+    sed -i '/^[[:space:]]*code[[:space:]]*\(\)[[:space:]]*{/,/^[[:space:]]*}/d' "$HOME/.bashrc"
 fi
-
-# Append the new function safely
-cat <<'EOC' >> ~/.bashrc
+cat <<'EOC' >> "$HOME/.bashrc"
 ${finalSafeCode}
 EOC
 EOF`;
@@ -330,15 +550,14 @@ EOF`;
         // Execute the heredoc injection
         await exec(sshCmd,{env: process.env}); // so that at the remote we pass all SSH_AUTH_SOCK env etc to get agent forwarding.
 
-        // Create (or reuse) a VS Code terminal
-        const terminal = vscode.window.createTerminal({ name: "RSync Terminal" });
 
-        terminal.show();
 
-        // Send reverse SSH tunnel command
-        const forwardCmd = `ssh -R ${port}:localhost:${port} -i ${Remote_server.keyPath} -o StrictHostKeyChecking=no ${userHost}`;
-        terminal.sendText(forwardCmd, true);
+        //Setting the port in the server instance
+        Remote_server.SetPort(port);
 
+        //Creat the terminal for reverse tunnel
+        TerminalLoader(userHost,Remote_server);
+       
         console.log("Boot sequence finished.");
     } catch (err) {
         console.error("Failed to start Boot:", err);
@@ -349,7 +568,7 @@ EOF`;
 
 
 
-async function mountSSHFS(context, value, mount_dir,logins,Remote_server) {
+async function mountSSHFS(context, value,Remote_server) {
     const [userHost, remotePath = '/'] = value.split(':');
 
     // checking if the server exists or not.
@@ -411,7 +630,8 @@ async function mountSSHFS(context, value, mount_dir,logins,Remote_server) {
 
     password = await vscode.window.showInputBox({
         prompt: `Enter password for ${userHost}`,
-        password: true
+        password: true,
+        ignoreFocusOut: true
     });
     if (!password) return;
 }
@@ -430,7 +650,7 @@ async function mountSSHFS(context, value, mount_dir,logins,Remote_server) {
                     vscode.window.showInformationMessage(`SSH key already exists at ${keyPath} and works`);
                 }
 
-                watcherScript = path.join(__dirname, 'socket_watcher.py');
+                watcherScript = path.join(__dirname, 'socket_watcher.py');  //initialising the connection to listen to the port from remote-aix.
                 if (!fs.existsSync(watcherScript)) {
                     vscode.window.showErrorMessage('Watcher script not found');
                     return;

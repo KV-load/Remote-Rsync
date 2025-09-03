@@ -1,3 +1,5 @@
+# File to update the command file with commands received over a socket from aix server
+
 import socket
 import random
 import sys
@@ -15,7 +17,7 @@ def get_free_port_above(min_port=4000, max_port=65535):
             except OSError:
                 continue  # port is busy, try again
 
-PORT = get_free_port_above(4000)
+PORT = get_free_port_above()
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     command_file = sys.argv[1];

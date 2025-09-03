@@ -16,7 +16,12 @@
       {
         "command": "remote-rsync.helloWorld",
         "title": "Hello World"
+      },
+      {
+        "command": "AIX_Terminals",
+        "title": "Open the terminals"
       }
+
     ]
   },
   "scripts": {
