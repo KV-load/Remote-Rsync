@@ -10,7 +10,8 @@ const {Cscope} = require('./cscope');
 
 const Client = require('ssh2-sftp-client')
 
-const FileExplorer = require('./Tools/Fileprovider').AixExplorerProvider;
+const FileExplorer = require('./Tools/Fileprovider').AixExplorerProvider; //Explorer to manage the files openes from the remote.
+const AixFSProvider = require('./Tools/Fileprovider').AixFSProvider;  //FileManager that reads/write the file from th remote.
 
 
 
@@ -83,6 +84,9 @@ class Server
         this.AIX_USER = AIX_USER;
         this.TEMP_DIR = TEMP_DIR;
         this.localtoRemote = new Map();
+        this._lastModified = new Map();
+        this.sftp = new Client();
+        
     }
 
     updateLocalToRemote(remotePath,fileName)
@@ -105,6 +109,13 @@ class Server
     Setkeypath(keyPath)
     {
         this.keyPath = keyPath;
+        this._connectPromise = this.sftp.connect({
+                host: this.AIX_HOST,
+                username: this.AIX_USER,
+                privateKey: fs.readFileSync(this.keyPath)
+            }).catch(err => {
+                vscode.window.showErrorMessage(`SFTP connect failed: ${err.message}`);
+            });
     }
 
       // --- NEW: serialize/deserialize helpers ---
@@ -130,170 +141,6 @@ class Server
 }
 
 
-class AixFSProvider {
-    constructor(aixUser, aixHost, keyPath, temp_dir) {
-        this.aixUser = aixUser;
-        this.aixHost = aixHost;
-        this.keyPath = keyPath;
-        this.tempDir = temp_dir || path.join(require('os').tmpdir(), 'aixfs');
-        this._emitter = new vscode.EventEmitter();
-        this.onDidChangeFile = this._emitter.event;
-
-        this._lastModified = new Map();
-        this.sftp = new Client();
-
-        // lazy connect
-        this._connectPromise = this.sftp.connect({
-            host: this.aixHost,
-            username: this.aixUser,
-            privateKey: fs.readFileSync(this.keyPath)
-        }).catch(err => {
-            vscode.window.showErrorMessage(`SFTP connect failed: ${err.message}`);
-        });
-    }
-
-    async readFile(uri) {
-        await this._connectPromise;
-        const remotePath = uri.path;
-        const preview_localPath = path.join(require('os').tmpdir(), path.basename(remotePath) + 'view');
-        const localPath = path.join(this.tempDir, path.basename(remotePath));
-
-        vscode.window.setStatusBarMessage(`Reading file from AIX: ${remotePath}`, 2000);
-
-        try {
-            await this.sftp.fastGet(remotePath, preview_localPath);
-            fs.copyFileSync(preview_localPath, localPath);
-
-            // Save mtime
-            const stat = await this.sftp.stat(remotePath);
-            this._lastModified.set(remotePath, stat.modifyTime);
-
-            return fs.readFileSync(preview_localPath); // Buffer for VS Code API
-        }  
-         catch (err) {
-        // If file not found, return empty
-        if (err.code === 2 || /No such file/i.test(err.message)) {
-            fs.writeFileSync(preview_localPath, "");
-            return Buffer.from("");
-        }
-
-        try {
-            // Try resolving symlinks
-            let stats = await this.sftp.stat(remotePath);
-            let new_remotePath = remotePath;
-
-            if ((stats.mode & 0o170000) !== 0o100000) {
-                console.log(`Resolving ${remotePath} (not a regular file)`);
-                new_remotePath = await this.sftp.realPath(remotePath);
-                stats = await this.sftp.stat(new_remotePath);
-            }
-
-            if ((stats.mode & 0o170000) === 0o100000) {
-                // Regular file → fastGet
-                await this.sftp.fastGet(new_remotePath, preview_localPath);
-                fs.copyFileSync(preview_localPath, localPath);
-                this._lastModified.set(remotePath, stats.modifyTime);
-                return fs.readFileSync(preview_localPath);
-            } else {
-                // 🚨 Not a regular file, final fallback → use SSH cat
-                console.log(`Falling back to remote cat for ${remotePath}`);
-                const { stdout, stderr } = await exec(
-                    `ssh ${this.aixUser}@${this.aixHost} "cat ${new_remotePath}"`
-                );
-
-                if (stderr && stderr.trim()) {
-                    throw new Error(`cat failed: ${stderr}`);
-                }
-                fs.writeFileSync(preview_localPath, stdout);
-                fs.copyFileSync(preview_localPath, localPath);
-                return fs.readFileSync(preview_localPath);
-            }
-        } catch (innerErr) {
-            console.error(`Failed to resolve/fetch ${remotePath}: ${innerErr.message}`);
-            throw new Error(`readFile failed for ${remotePath}: ${innerErr.message}`);
-        }
-    }
-}
-
-    async writeFile(uri, content, options) {
-        await this._connectPromise;
-        const remotePath = uri.path;
-        const tmpFile = path.join(this.tempDir, path.basename(remotePath));
-        const preview_tmpFile = path.join(require('os').tmpdir(), path.basename(remotePath) + 'view');
-
-        fs.writeFileSync(preview_tmpFile, content);
-
-        try {
-            // Use rsync instead of sftp
-            await this._rsyncPut(preview_tmpFile, remotePath);
-
-            fs.copyFileSync(preview_tmpFile, tmpFile);
-
-            const stat = await this.sftp.stat(remotePath);
-            this._lastModified.set(remotePath, stat.modifyTime);
-
-            this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
-        } catch (err) {
-            throw new Error(`writeFile failed for ${remotePath}: ${err.message}`);
-        }
-}
-
-    // Helper
-async _rsyncPut(localPath, remotePath) {
-    return new Promise((resolve, reject) => {
-        const cmd = 'rsync';
-        const args = ['-az', localPath, `${this.aixUser}@${this.aixHost}:${remotePath}`];
-
-        const child = spawn(cmd, args);
-
-        let stderr = '';
-        child.stderr.on('data', (data) => {
-            stderr += data.toString();
-        });
-
-        child.on('close', (code) => {
-            if (code !== 0) {
-                return reject(new Error(`rsync exited with code ${code}: ${stderr}`));
-            }
-            resolve();
-        });
-    });
-}
-    watch(uri, options) {
-        const remotePath = uri.path;
-
-        const interval = setInterval(async () => {
-            try {
-                await this._connectPromise;
-                const stat = await this.sftp.stat(remotePath);
-                const mtime = stat.modifyTime;
-                const lastMtime = this._lastModified.get(remotePath);
-
-                if (!lastMtime) {
-                    this._lastModified.set(remotePath, mtime);
-                } else if (mtime !== lastMtime) {
-                    this._lastModified.set(remotePath, mtime);
-
-                    // Trigger change event, consumer will re-read
-                    this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
-                }
-            } catch (err) {
-                console.error(`Watch error for ${remotePath}: ${err.message}`);
-            }
-        }, 2000); // faster than before (2s instead of 3s)
-
-        return new vscode.Disposable(() => clearInterval(interval));
-    }
-
-    stat(uri) {
-        return { type: vscode.FileType.File, ctime: Date.now(), mtime: Date.now(), size: 0 };
-    }
-    readDirectory() { return []; }
-    createDirectory() {}
-    delete() {}
-    rename() {}
-}
-
 
 
 function activate(context) {
@@ -301,6 +148,13 @@ function activate(context) {
     //Defining the custom file explorer to be run for the AIX
     const Explorer = new FileExplorer(getServer);
     vscode.window.createTreeView('AIX-explorer', { treeDataProvider: Explorer });
+
+    // Defining the filesystem for the AIX
+    const provider = new AixFSProvider(AllServers); // pass your server map
+context.subscriptions.push(
+  vscode.workspace.registerFileSystemProvider("aix", provider, { isCaseSensitive: true })
+);
+
 
 
     //To defined it globally so that disposable can use .
@@ -365,39 +219,39 @@ function activate(context) {
         
 
         // Register the virtual file system provider for aix:
-        const provider = new AixFSProvider(AIX_USER, AIX_HOST, Remote_server.keyPath,TEMP_DIR);
-        context.subscriptions.push(
-            vscode.workspace.registerFileSystemProvider(`aix_${AIX_HOST}`, provider, { isCaseSensitive: true })
-        );
+        // const provider = new AixFSProvider(AIX_USER, AIX_HOST, Remote_server.keyPath,TEMP_DIR);
+        // context.subscriptions.push(
+        //     vscode.workspace.registerFileSystemProvider(`aix_${AIX_HOST}`, provider, { isCaseSensitive: true })
+        // );
 
         // for the case when we load the files from local temp
-vscode.workspace.onDidOpenTextDocument(async doc => {
-    const filePath = doc.uri.fsPath;
+// vscode.workspace.onDidOpenTextDocument(async doc => {
+//     const filePath = doc.uri.fsPath;
 
-    // Only intercept TEMP files, not VFS URIs
-    if (filePath.startsWith(TEMP_DIR)) {
-        const fileName = path.basename(filePath);
-        const remotePath = Remote_server.localtoRemote.get(fileName);
-        const vfsUri = vscode.Uri.parse(`aix_${AIX_HOST}:${remotePath}`);
+//     // Only intercept TEMP files, not VFS URIs
+//     if (filePath.startsWith(TEMP_DIR)) {
+//         const fileName = path.basename(filePath);
+//         const remotePath = Remote_server.localtoRemote.get(fileName);
+//         const vfsUri = vscode.Uri.parse(`aix_${AIX_HOST}:${remotePath}`);
 
-        // Defer to let VSCode finish opening first
-       setTimeout(async () => {
-    // Find the editor showing this TEMP file
-    const editor = vscode.window.visibleTextEditors.find(e => e.document.uri.fsPath === filePath);
-    if (editor) {
-        await vscode.window.showTextDocument(editor.document); // make it active
-        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
-    }
+//         // Defer to let VSCode finish opening first
+//        setTimeout(async () => {
+//     // Find the editor showing this TEMP file
+//     const editor = vscode.window.visibleTextEditors.find(e => e.document.uri.fsPath === filePath);
+//     if (editor) {
+//         await vscode.window.showTextDocument(editor.document); // make it active
+//         await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+//     }
 
-    // Now open the VFS one
-    const file = await vscode.workspace.openTextDocument(vfsUri);
-    await vscode.window.showTextDocument(file, { preview: true, preserveFocus: false });
-}, 50);
+//     // Now open the VFS one
+//     const file = await vscode.workspace.openTextDocument(vfsUri);
+//     await vscode.window.showTextDocument(file, { preview: true, preserveFocus: false });
+// }, 50);
 
-    }
-});
+//     }
+// });
 
-
+    // Closing the listener who's terminal have stopped and they have nothing to do.
     vscode.window.onDidCloseTerminal((closedTerm) => {
         const proc = Listeners.get(closedTerm);
         if (proc) {
@@ -464,6 +318,11 @@ async function getServer()
         )
     );
 }
+//Returning all the Server map
+async function AllServers()
+{
+    return Servers;
+}
 
 
 function watchCommandFile(Remote_server) {
@@ -499,7 +358,11 @@ async function pullFromAix(remotePath,Remote_server) {
     Remote_server.updateLocalToRemote(remotePath,path.basename(remotePath));
     fs.writeFileSync(path.join(Remote_server.TEMP_DIR,`${Remote_server.AIX_HOST}_files.json`),JSON.stringify(Remote_server.localtoRemote));
 
-    const uri = vscode.Uri.parse(`aix_${Remote_server.AIX_HOST}:${remotePath}`);
+      const uri = vscode.Uri.from({
+                scheme: "aix",
+                authority: Remote_server.AIX_HOST,
+                path: remotePath
+            });
     const doc = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
 }
