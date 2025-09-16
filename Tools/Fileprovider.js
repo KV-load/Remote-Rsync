@@ -1,4 +1,5 @@
 
+
 const vscode = require('vscode');
 const fs = require('fs');
 const Client = require('ssh2-sftp-client')
@@ -9,6 +10,33 @@ const exec = util.promisify(require('child_process').exec);
 const spawn = require('child_process').spawn;
 
 
+
+//function to get the dir name from the file_name
+
+async function filetodirname(localPath) {
+    let temp_str ="";
+    let server_name = "";
+
+    for(let i=0;i<localPath.length-1;i++){
+    console.log(temp_str)
+
+        if(localPath[i]!=="/"){
+            temp_str+=localPath[i];
+        }
+        else{
+            if(temp_str.length>0 && temp_str.includes("temp_"))
+            {
+                server_name = temp_str.split('_')[1];
+                break;
+            }
+            temp_str="";
+        }
+    }
+
+
+return server_name;
+
+}
 
 
 
@@ -48,25 +76,29 @@ class AixFSProvider {
         const preview_localPath = path.join(require('os').tmpdir(), path.basename(remotePath) + 'view');
         const localPath = path.join(remote_server.TEMP_DIR, path.basename(remotePath));
 
-        vscode.window.setStatusBarMessage(`Reading file from AIX: ${remotePath}`, 2000);
+        const sftp = remote_server.sftp;
 
-        try {
-            await remote_server.sftp.fastGet(remotePath, preview_localPath);
-            fs.copyFileSync(preview_localPath, localPath);
+    try {
+        
+       await this.streamfetch(sftp, remotePath, localPath);
 
-            // Save mtime
-            const stat = await remote_server.sftp.stat(remotePath);
-            remote_server._lastModified.set(remotePath, stat.modifyTime);
+        // Save mtime
+        const stat = await sftp.stat(remotePath);
+        remote_server._lastModified.set(remotePath, stat.modifyTime);
 
-            return fs.readFileSync(preview_localPath); // Buffer for VS Code API
-        }  
+        // ✅ VS Code gets a single clean buffer load
+        return fs.readFileSync(localPath);
+
+    } 
          catch (err) {
         // If file not found, return empty
-        if (err.code === 2 || /No such file/i.test(err.message)) {
-            fs.writeFileSync(preview_localPath, "");
+        if (err.code === 2 || /No such file/i.test(err.message) || err.message.includes("Unable to read file")) {
+            
+            // fs.writeFileSync(preview_localPath, "");  
+            fs.writeFileSync(localPath,"");
+
             return Buffer.from("");
         }
-
         try {
             // Try resolving symlinks
             let stats = await remote_server.sftp.stat(remotePath);
@@ -80,10 +112,15 @@ class AixFSProvider {
 
             if ((stats.mode & 0o170000) === 0o100000) {
                 // Regular file → fastGet
-                await remote_server.sftp.fastGet(new_remotePath, preview_localPath);
-                fs.copyFileSync(preview_localPath, localPath);
+                await this.streamfetch(sftp, new_remotePath, localPath);
+
+                // await remote_server.sftp.fastGet(new_remotePath, localPath);  You download directly into localPath (the file your editor buffer is tied to, if you opened file://...).
+                                                                                //VS Code monitors local files with the OS file watcher.
+                                                                                //When that file changes on disk → VS Code sees it as an external change → it closes/reloads the whole buffer → flicker, "file reloaded" message, cursor reset, etc.
+         
                 remote_server._lastModified.set(remotePath, stats.modifyTime);
-                return fs.readFileSync(preview_localPath);
+                return fs.readFileSync(localPath);
+
             } else {
                 // 🚨 Not a regular file, final fallback → use SSH cat
                 console.log(`Falling back to remote cat for ${remotePath}`);
@@ -96,13 +133,36 @@ class AixFSProvider {
                 }
                 fs.writeFileSync(preview_localPath, stdout);
                 fs.copyFileSync(preview_localPath, localPath);
-                return fs.readFileSync(preview_localPath);
+
+                return fs.readFileSync(preview_localPath); // Buffer just changed not whole file hence smooth transition instead of that local_path
             }
         } catch (innerErr) {
             console.error(`Failed to resolve/fetch ${remotePath}: ${innerErr.message}`);
             throw new Error(`readFile failed for ${remotePath}: ${innerErr.message}`);
         }
     }
+}
+
+async streamfetch(sftp,remotePath,localPath) // for fetching the data from the files in smooth way not waiting to fetch whole data.
+{
+        const tmpPath = localPath + ".part";  // temp file during download
+
+        vscode.window.setStatusBarMessage(`Streaming file from AIX: ${remotePath}`, 2000);
+
+        const readStream = sftp.createReadStream(remotePath);
+        const writeStream = fs.createWriteStream(tmpPath);
+
+        await new Promise((resolve, reject) => {
+            readStream
+                .on("error", reject)
+                .pipe(writeStream)
+                .on("error", reject)
+                .on("finish", resolve);
+        });
+
+        // 🔄 atomic replace: tmp → local
+        fs.renameSync(tmpPath, localPath);
+
 }
 
     async writeFile(uri, content, options) {
@@ -112,18 +172,21 @@ class AixFSProvider {
         const remote_server = Servers.get(hostname);
         await remote_server._connectPromise;
 
-        await remote_server._connectPromise;
         const remotePath = uri.path;
         const tmpFile = path.join(remote_server.TEMP_DIR, path.basename(remotePath));
         const preview_tmpFile = path.join(require('os').tmpdir(), path.basename(remotePath) + 'view');
 
-        fs.writeFileSync(preview_tmpFile, content);
+        // fs.writeFileSync(preview_tmpFile, content);
+
+        fs.writeFileSync(tmpFile, content);
 
         try {
             // Use rsync instead of sftp
-            await this._rsyncPut(preview_tmpFile, remotePath,remote_server);
+            // await this._rsyncPut(preview_tmpFile, remotePath,remote_server);
 
-            fs.copyFileSync(preview_tmpFile, tmpFile);
+            // fs.copyFileSync(preview_tmpFile, tmpFile);
+
+            await this._rsyncPut(tmpFile, remotePath,remote_server);
 
             const stat = await remote_server.sftp.stat(remotePath);
             remote_server._lastModified.set(remotePath, stat.modifyTime);
@@ -191,9 +254,12 @@ async _rsyncPut(localPath, remotePath,remote_server) {
     async stat(uri) {
     const Servers = await this.getServers();
 
+
     const hostname = uri.authority;
     const remote_server = Servers.get(hostname);
+    try{
     const stats = await remote_server.sftp.stat(uri.path);
+    
 
     return {
         type: vscode.FileType.File,
@@ -201,6 +267,23 @@ async _rsyncPut(localPath, remotePath,remote_server) {
         mtime: stats.modifyTime * 1000,
         size: stats.size
     };
+}
+catch (err) {
+    if (err.code === 2 || /No such file/i.test(err.message)) {
+        // Fake stat so VS Code opens the editor
+
+        const {stdout} = await exec(`ssh ${remote_server.AIX_USER}@${remote_server.AIX_HOST} "date +%s"`);
+
+        const remote_time = parseInt(stdout.trim(),10)*1000;
+        return {
+            type: vscode.FileType.File,
+            ctime: remote_time,   // use local time, since remote doesn’t have one
+            mtime: remote_time,
+            size: 0
+        };
+    }
+    throw err;
+}
 }
     refresh() {
         this._emitter.fire(); // a bit hacky, but works well
@@ -230,9 +313,9 @@ class FileNode extends vscode.TreeItem {
         // If it's a file, allow opening
         if (!isFolder) {
             this.command = {
-                command: 'openFile',
+                command: 'OpenFile',
                 title: 'Open File',
-                arguments: [this.fullPath]
+                arguments: [this]
             };
         }
     }
@@ -240,12 +323,12 @@ class FileNode extends vscode.TreeItem {
 
 
 class AixExplorerProvider  {
-    constructor(getServersCallback,Remote_server) {
+    constructor(getServersCallback,AllServers) {
         // Instead of a static list, we use a callback that returns current servers
         this.getServers = getServersCallback;
+        this.AllServers = AllServers;
         this._emitter = new vscode.EventEmitter();
         this.onDidChangeTreeData = this._emitter.event;
-        this.server = Remote_server;
 
     }
 
@@ -253,22 +336,30 @@ class AixExplorerProvider  {
         return element;
     }
 
-  async openFile(file, e) {
+  async OpenFile(file) {
     const localPath = file.resourceUri.fsPath;
+    const Servers = await this.AllServers();
+
+    // vscode.window.showInformationMessage(localPath," ");
+
+    
+    const server_name = await filetodirname(localPath);
+    const remote_server = await Servers.get(server_name); 
+
 
     if (fs.existsSync(localPath)) {
-        // Open from local cache first
-        const doc = await vscode.workspace.openTextDocument(localPath);
+        
+        // Open from local caffche first
+        let doc = await vscode.workspace.openTextDocument(localPath);
         await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
-    } else {
         // Open from remote via your custom provider
-        const remotePath = this.server.localtoRemote.get(file.label);
+        const remotePath = remote_server.localtoRemote.get(file.label);
         const uri = vscode.Uri.from({
             scheme: "aix",
-            authority: this.server.AIX_HOST,
+            authority: remote_server.AIX_HOST,
             path: remotePath
         });
-        const doc = await vscode.workspace.openTextDocument(uri);
+         doc = await vscode.workspace.openTextDocument(uri);
         await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
     }
 }
@@ -308,6 +399,46 @@ class AixExplorerProvider  {
 }
 }
 
+// class AIXTimeline
+// {
+//    constructor(GetAllServers)
+//    {
+//        this.GetAllServers = GetAllServers;
+//    }
+
+//    async provideTimeline(uri, options, token) {
+//         // Map aix:// to its cached local path
+
+
+//         const All_server = await this.GetAllServers();
+
+
+//         const host = uri.authority;
+
+//         const temp_dir = All_server.get(host).TEMP_DIR;
+
+//         const remote_path = uri.path;
+
+//         remote_path.split("/");
+//         const local_path = path.join(temp_dir,remote_path[remote_path.length-1]);
+
+//         const localUri = vscode.Uri.file(local_path);
+
+//         // Ask VS Code’s built-in timeline providers to give us history
+//         const timeline = await vscode.commands.executeCommand(
+//             "vscode.provideTimeline",
+//             localUri,
+//             options,
+//             token
+//         );
+
+//         // Just return that, but pretend it's for aix://
+       
+//         return {
+//              items: timeline?.items ?? [] ,
+//         };
+//     }
+// }
 
 
 module.exports = {AixExplorerProvider,AixFSProvider};

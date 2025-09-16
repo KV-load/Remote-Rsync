@@ -6,11 +6,11 @@ const path = require('path');
 const vscode = require('vscode');
 const chokidar = require('chokidar');
 
-const {Cscope} = require('./cscope');
+const {Cscope} = require('./Tools/cscope').Cscope;
 
 const Client = require('ssh2-sftp-client')
 
-const FileExplorer = require('./Tools/Fileprovider').AixExplorerProvider; //Explorer to manage the files openes from the remote.
+// const FileExplorer = require('./Tools/Fileprovider').AixExplorerProvider; //Explorer to manage the files openes from the remote.
 const AixFSProvider = require('./Tools/Fileprovider').AixFSProvider;  //FileManager that reads/write the file from th remote.
 
 
@@ -67,6 +67,8 @@ class ServerReload {
 // Global map to store all server instances
 const Servers = new Map();
 const Listeners = new Map();
+const uriLocaltoRemote = new Map();
+
 
 
 // common to all servers
@@ -74,6 +76,7 @@ let LOCAL_SYNC_DIR = '';
 let mount_dir = '';
 let watcherScript = '';
 let safeCode ='';
+// let Explorer = null;
 
 class Server
 {
@@ -86,6 +89,7 @@ class Server
         this.localtoRemote = new Map();
         this._lastModified = new Map();
         this.sftp = new Client();
+        this._connectPromise = null;
         
     }
 
@@ -145,15 +149,25 @@ class Server
 
 function activate(context) {
 
-    //Defining the custom file explorer to be run for the AIX
-    const Explorer = new FileExplorer(getServer);
-    vscode.window.createTreeView('AIX-explorer', { treeDataProvider: Explorer });
+    // //Defining the custom file explorer to be run for the AIX
+    // Explorer = new FileExplorer(getServer,AllServers);
+    // vscode.window.createTreeView('AIX-explorer', { treeDataProvider: Explorer });
 
     // Defining the filesystem for the AIX
     const provider = new AixFSProvider(AllServers); // pass your server map
 context.subscriptions.push(
   vscode.workspace.registerFileSystemProvider("aix", provider, { isCaseSensitive: true })
 );
+
+// // fucntiond for the new epxplorere
+// context.subscriptions.push(
+//     vscode.commands.registerCommand("OpenFile",async(file)=>
+//     {
+//         await Explorer.OpenFile(file);
+//     }
+// )
+// );
+
 
 
 
@@ -211,7 +225,7 @@ context.subscriptions.push(
 
       
         Servers.set(AIX_HOST, Remote_server);
-        Explorer.refresh();
+        // Explorer.refresh();
 
 
      
@@ -260,6 +274,59 @@ context.subscriptions.push(
         }
     });
 
+
+
+    //Saving the files which will be done by my custom fs. 
+ vscode.workspace.onDidSaveTextDocument(async (event) => {
+    const local_uri = event.uri;
+
+    const remote_uri = uriLocaltoRemote.get(local_uri.toString());
+    if (!remote_uri) return; // not an AIX-mapped file
+
+    await provider.writeFile(remote_uri, Buffer.from(event.getText()), {
+        create: true,
+        overwrite: true
+    });
+});
+
+    //Running watch from custom AIXfs to see any updates from remote to local  
+let currentWatcher;
+
+vscode.window.onDidChangeActiveTextEditor(async (editor) => {
+    if (!editor) return;
+
+    // Stop previous watcher
+    if (currentWatcher) {
+        currentWatcher.dispose();
+        currentWatcher = null;
+    }
+
+    const local_uri = editor.document.uri;
+    const remote_uri = uriLocaltoRemote.get(local_uri.toString());
+    if (!remote_uri) return;
+
+    // Start watcher for the new active file
+    currentWatcher = provider.watch(remote_uri);
+});
+
+
+// Opening the file from the local editor
+vscode.workspace.onDidOpenTextDocument((editor) => {
+    if (!editor) return;
+
+    // Stop previous watcher
+    if (currentWatcher) {
+        currentWatcher.dispose();
+        currentWatcher = null;
+    }
+
+    const local_uri = editor.uri;
+    const remote_uri = uriLocaltoRemote.get(local_uri.toString());
+    if (!remote_uri) return;
+
+    // Start watcher for the new active file
+    currentWatcher = provider.watch(remote_uri);
+});
 
 
         watchCommandFile(Remote_server);
@@ -341,7 +408,7 @@ function watchCommandFile(Remote_server) {
             pullFromAix(newtarget,Remote_server);
 
             dir = target.split('::')[0].trim();
-            Cscope(Remote_server,dir,mount_dir);
+            // Cscope(Remote_server,dir,mount_dir);
 
 
         }
@@ -356,6 +423,9 @@ function watchCommandFile(Remote_server) {
 async function pullFromAix(remotePath,Remote_server) {
     remotePath = path.posix.normalize(remotePath);
     Remote_server.updateLocalToRemote(remotePath,path.basename(remotePath));
+    // Explorer.refresh();
+
+    const localFile = path.join(Remote_server.TEMP_DIR, path.basename(remotePath));
     fs.writeFileSync(path.join(Remote_server.TEMP_DIR,`${Remote_server.AIX_HOST}_files.json`),JSON.stringify(Remote_server.localtoRemote));
 
       const uri = vscode.Uri.from({
@@ -363,8 +433,13 @@ async function pullFromAix(remotePath,Remote_server) {
                 authority: Remote_server.AIX_HOST,
                 path: remotePath
             });
+
+      const local_uri = vscode.Uri.file(localFile);
+
+      uriLocaltoRemote.set(local_uri.toString(),uri);
     const doc = await vscode.workspace.openTextDocument(uri);
-    await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
+    const local_file = await vscode.workspace.openTextDocument(localFile);
+    await vscode.window.showTextDocument(local_file, { preview: true, preserveFocus: false });
 }
 
 function saveConfig(context, login) {
@@ -510,6 +585,7 @@ try {
 
 
     let keyPath = `${process.env.HOME}/.ssh/id_rsa_${Remote_server.AIX_HOST}`;
+
     Remote_server.Setkeypath(keyPath);
 
 

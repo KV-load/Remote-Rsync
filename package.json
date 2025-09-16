@@ -12,14 +12,6 @@
   "main": "./extension.js",
   "publisher": "Kushal Verma",
   "contributes": {
-    "views": {
-      "explorer": [
-        {
-          "id": "AIX-explorer",
-          "name": "AIX"
-        }
-      ]
-    },
     "commands": [
       {
         "command": "remote-rsync.helloWorld",
