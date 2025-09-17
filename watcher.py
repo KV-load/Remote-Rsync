@@ -2,8 +2,8 @@ import os
 import time
 import sys
 
-def RsyncCommand(ssh_id, aix_usr, aix_host, ssh_dir, rsync_cmd="~/.sshfs/command.txt"):
-    cmd = f'rsync -avz -e "ssh -i {ssh_id}" {aix_usr}@{aix_host}:{rsync_cmd} {ssh_dir}'
+def RsyncCommand(ssh_id, aix_usr, aix_host, ssh_dir, rsync_cmd):
+    cmd = f'rsync -avz -e "ssh -i {ssh_id}" {aix_usr}@{aix_host}:{rsync_cmd} {ssh_dir}/command_{aix_host}.txt'
     print(f"Executing command: {cmd}")
     os.system(cmd)
 
@@ -17,10 +17,11 @@ if __name__ == "__main__":
     ssh_dir = sys.argv[4] if len(sys.argv) > 4 else os.path.expanduser("~/.sshfs")
 
     print(f"Using AIX User: {aix_usr}, Host: {aix_host}, SSH ID: {aix_isa_id}, SSH Directory: {ssh_dir}")
+    rsync_cmd = f"~/.sshfs/command.txt"
     while True:
-        RsyncCommand(aix_isa_id, aix_usr, aix_host, ssh_dir)
+        RsyncCommand(aix_isa_id, aix_usr, aix_host, ssh_dir,rsync_cmd)
 
-        if not os.path.exists("command.txt"):
+        if not os.path.exists(f"command_{aix_host}.txt"):
             print("command.txt does not exist, waiting for next check...")
             time.sleep(5)
             continue
