@@ -13,6 +13,9 @@ const Client = require('ssh2-sftp-client')
 // const FileExplorer = require('./Tools/Fileprovider').AixExplorerProvider; //Explorer to manage the files openes from the remote.
 const AixFSProvider = require('./Tools/Fileprovider').AixFSProvider;  //FileManager that reads/write the file from th remote.
 
+const hash_path = require('./Tools/Fileprovider').hash_path;
+const Parenttodir = require('./Tools/Fileprovider').Parenttodir;
+
 
 
 // Handling downtime and restart the servers
@@ -149,6 +152,10 @@ class Server
 
 function activate(context) {
 
+    let activeWatcher = null;
+
+    const Explorer_watcher = vscode.workspace.createFileSystemWatcher("**/*");  //for when some local files are deleted
+
     // //Defining the custom file explorer to be run for the AIX
     // Explorer = new FileExplorer(getServer,AllServers);
     // vscode.window.createTreeView('AIX-explorer', { treeDataProvider: Explorer });
@@ -167,6 +174,23 @@ context.subscriptions.push(
 //     }
 // )
 // );
+ // 👇 Register listener globally during activation, not inside a command
+    const editorChangeDisposable = vscode.window.onDidChangeActiveTextEditor((editor) => {
+        vscode.window.showInformationMessage("Active file changed");
+
+        if (activeWatcher) {
+            activeWatcher.dispose();
+            activeWatcher = null;
+        }
+
+        const local_uri = editor?.document.uri;
+        if (!local_uri) return;
+
+        const remote_uri = uriLocaltoRemote.get(local_uri.toString());
+        if (!remote_uri) return; // not an AIX-mapped file
+
+        activeWatcher = provider.watch(remote_uri);
+    });
 
 
 
@@ -265,14 +289,6 @@ context.subscriptions.push(
 //     }
 // });
 
-    // Closing the listener who's terminal have stopped and they have nothing to do.
-    vscode.window.onDidCloseTerminal((closedTerm) => {
-        const proc = Listeners.get(closedTerm);
-        if (proc) {
-            proc.kill(); // stop python listener
-            Listeners.delete(closedTerm);
-        }
-    });
 
 
 
@@ -290,43 +306,71 @@ context.subscriptions.push(
 });
 
     //Running watch from custom AIXfs to see any updates from remote to local  
-let currentWatcher;
-
-vscode.window.onDidChangeActiveTextEditor(async (editor) => {
-    if (!editor) return;
-
-    // Stop previous watcher
-    if (currentWatcher) {
-        currentWatcher.dispose();
-        currentWatcher = null;
-    }
-
-    const local_uri = editor.document.uri;
-    const remote_uri = uriLocaltoRemote.get(local_uri.toString());
-    if (!remote_uri) return;
-
-    // Start watcher for the new active file
-    currentWatcher = provider.watch(remote_uri);
-});
-
 
 // Opening the file from the local editor
-vscode.workspace.onDidOpenTextDocument((editor) => {
-    if (!editor) return;
 
-    // Stop previous watcher
-    if (currentWatcher) {
-        currentWatcher.dispose();
-        currentWatcher = null;
+// vscode.workspace.onDidOpenTextDocument((doc) => {
+//     const remote_uri = uriLocaltoRemote.get(doc.uri.toString());
+//     if (!remote_uri) return;
+
+//     const key = remote_uri.toString();
+//     if (!watchers.has(key)) {
+//         const watcher = (remote_uri);
+//         watchers.set(key, watcher);
+//     }
+// });
+
+
+// Closing the listener who's terminal have stopped and they have nothing to do.
+vscode.window.onDidCloseTerminal((closedTerm) => {
+    const proc = Listeners.get(closedTerm);
+    if (proc) {
+        proc.kill(); // stop python listener
+        Listeners.delete(closedTerm);
     }
-
-    const local_uri = editor.uri;
-    const remote_uri = uriLocaltoRemote.get(local_uri.toString());
-    if (!remote_uri) return;
-
-    // Start watcher for the new active file
-    currentWatcher = provider.watch(remote_uri);
 });
+
+
+// Clean up when doc is closed
+// vscode.workspace.onDidCloseTextDocument((doc) => {
+//     const local_uri = doc.uri;
+//     const remote_uri = uriLocaltoRemote.get(local_uri.toString());
+
+//     const key = remote_uri.toString();
+
+//     watchers.get(key)?.dispose();
+
+//     watchers.delete(key);
+    
+//     // if (doc.uri.toString() === local_uri.toString()) {
+//     //     watchers.delete(key);
+//     // }
+// });
+
+// vscode.window.onDidChangeActiveTextEditor((editor) => {
+//     // Dispose previous watcher
+
+//     vscode.window.showInformationMessage("Active file changed");
+
+//     if (activeWatcher) {
+//         activeWatcher.dispose();
+//         activeWatcher = null;
+//     }
+
+//     const local_uri = editor?.document.uri;
+//     if (!local_uri) return;
+
+//     const remote_uri = uriLocaltoRemote.get(local_uri.toString());
+//     if (!remote_uri) return; // not an AIX-mapped file
+
+//     // Create a new watcher for the currently active file
+//     activeWatcher = provider.watch(remote_uri);
+// });
+
+
+
+
+
 
 
         watchCommandFile(Remote_server);
@@ -334,6 +378,13 @@ vscode.workspace.onDidOpenTextDocument((editor) => {
 
 
 
+// Local files are deleted and we have to remove the cache of the aixfs
+  Explorer_watcher.onDidDelete(uri => {
+    if (uriLocaltoRemote.has(uri.toString())) {
+        console.log("Local file deleted, clearing cache:", uri.fsPath);
+        uriLocaltoRemote.delete(uri.toString());
+    }
+});
 
     let disposable2 = vscode.commands.registerCommand("AIX_Terminals", async function() {
     // Turn the Servers map into QuickPick items
@@ -366,7 +417,7 @@ vscode.workspace.onDidOpenTextDocument((editor) => {
     Boot(`${chosenServer.AIX_USER}@${chosenHost}`, chosenServer);
 });
 
-
+    context.subscriptions.push(editorChangeDisposable);
     context.subscriptions.push(disposable);
     context.subscriptions.push(disposable2);
 }
@@ -420,26 +471,35 @@ function watchCommandFile(Remote_server) {
     });
 }
 
+
+
+
 async function pullFromAix(remotePath,Remote_server) {
     remotePath = path.posix.normalize(remotePath);
-    Remote_server.updateLocalToRemote(remotePath,path.basename(remotePath));
     // Explorer.refresh();
 
-    const localFile = path.join(Remote_server.TEMP_DIR, path.basename(remotePath));
-    fs.writeFileSync(path.join(Remote_server.TEMP_DIR,`${Remote_server.AIX_HOST}_files.json`),JSON.stringify(Remote_server.localtoRemote));
+    
+    // fs.writeFileSync(path.join(Remote_server.TEMP_DIR,`${Remote_server.AIX_HOST}_files.json`),JSON.stringify(Remote_server.localtoRemote));
 
       const uri = vscode.Uri.from({
                 scheme: "aix",
                 authority: Remote_server.AIX_HOST,
-                path: remotePath
+                path: remotePath,
             });
 
-      const local_uri = vscode.Uri.file(localFile);
+        const localFile = await hash_path(remotePath,Remote_server);
+
+        // Remote_server.updateLocalToRemote(path.basename(remotePath),remotePath); 
+
+            let local_uri = vscode.Uri.file(localFile);
+            // local_uri = local_uri.with({fragment: `${Date.now()}`});
 
       uriLocaltoRemote.set(local_uri.toString(),uri);
-    const doc = await vscode.workspace.openTextDocument(uri);
-    const local_file = await vscode.workspace.openTextDocument(localFile);
-    await vscode.window.showTextDocument(local_file, { preview: true, preserveFocus: false });
+
+    await vscode.workspace.openTextDocument(uri);
+    const local_file = await vscode.workspace.openTextDocument(local_uri);
+    await vscode.window.showTextDocument(local_file, { preview: true, preserveFocus: true });
+    
 }
 
 function saveConfig(context, login) {
@@ -749,6 +809,11 @@ for (const [terminal, pyproc] of Listeners) {
         pyproc.kill();
     }
 }
+
+Parenttodir.clear();
+uriLocaltoRemote.clear();
+Servers.clear();
+Listeners.clear();
 
 }
 
