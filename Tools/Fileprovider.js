@@ -9,10 +9,13 @@ const util = require('util');
 const exec = util.promisify(require('child_process').exec);
 const spawn = require('child_process').spawn;
 
-
+const crypto =require('crypto');
 
 //function to get the dir name from the file_name
 
+const Parenttodir = new Map();  // to store the pathways for the parent remote dir and the folder.
+
+ 
 async function filetodirname(localPath) {
     let temp_str ="";
     let server_name = "";
@@ -38,6 +41,65 @@ return server_name;
 
 }
 
+
+async function hash_path(remotePath,Remote_server)
+{
+    const base = path.basename(remotePath); 
+
+    const parent = path.dirname(remotePath); // e.g. project1
+
+    let local_dirname = '';
+
+    if(Parenttodir.get(parent)){
+        local_dirname = Parenttodir.get(parent);
+    }
+    else{
+        console.log("Creating new folder for ",parent," inside ",Remote_server.TEMP_DIR);
+        local_dirname = path.join(Remote_server.TEMP_DIR,path.basename(parent));
+        local_dirname = local_dirname + "@0";
+
+        // to check if the folder already exists then just create a one cntr_more;
+        let cnt = parseInt(local_dirname.split("@")[1]);
+        const dirname =  local_dirname.split("@")[0];
+
+        while(fs.existsSync(local_dirname))
+        {
+        cnt++;
+        local_dirname = `${dirname}@${cnt}`;
+        }
+        console.log(local_dirname);
+        Parenttodir.set(parent,local_dirname);
+    }
+
+
+
+    
+
+ 
+    // let old_parent = "";
+    // if(Remote_server.localtoRemote.get(base))
+    // {
+    //     old_parent = Remote_server.localtoRemote.get(base);
+    //     old_parent = path.dirname(old_parent);
+    //     if(parent==old_parent)
+    //     {
+
+    //     }
+    // }
+
+    
+
+    
+    const local_path = path.join(local_dirname, base);
+
+
+    fs.mkdirSync(local_dirname, { recursive: true });
+        
+
+    //creating directory inside it saving the files with same name 
+
+    return local_path;
+}
 
 
 class AixFSProvider {
@@ -70,11 +132,12 @@ class AixFSProvider {
         const hostname = uri.authority;
 
         const remote_server = Servers.get(hostname);
-        await remote_server._connectPromise;
+        // await remote_server._connectPromise;
 
         const remotePath = uri.path;
         const preview_localPath = path.join(require('os').tmpdir(), path.basename(remotePath) + 'view');
-        const localPath = path.join(remote_server.TEMP_DIR, path.basename(remotePath));
+        const localPath = await hash_path(remotePath,remote_server);
+
 
         const sftp = remote_server.sftp;
 
@@ -152,15 +215,18 @@ async streamfetch(sftp,remotePath,localPath) // for fetching the data from the f
         const readStream = sftp.createReadStream(remotePath);
         const writeStream = fs.createWriteStream(tmpPath);
 
+        // using readstream.once here for so that it creates this onw time only instead of creating each time when I save the file,
+
         await new Promise((resolve, reject) => {
             readStream
-                .on("error", reject)
+                .once("error", reject)
                 .pipe(writeStream)
-                .on("error", reject)
-                .on("finish", resolve);
+                .once("error", reject)
+                .once("finish", resolve);
         });
 
         // 🔄 atomic replace: tmp → local
+        
         fs.renameSync(tmpPath, localPath);
 
 }
@@ -170,10 +236,10 @@ async streamfetch(sftp,remotePath,localPath) // for fetching the data from the f
         const Servers = await this.getServers();
 
         const remote_server = Servers.get(hostname);
-        await remote_server._connectPromise;
+        // await remote_server._connectPromise;
 
         const remotePath = uri.path;
-        const tmpFile = path.join(remote_server.TEMP_DIR, path.basename(remotePath));
+        const tmpFile = await hash_path(remotePath,remote_server);
         const preview_tmpFile = path.join(require('os').tmpdir(), path.basename(remotePath) + 'view');
 
         // fs.writeFileSync(preview_tmpFile, content);
@@ -206,11 +272,12 @@ async _rsyncPut(localPath, remotePath,remote_server) {
         const child = spawn(cmd, args);
 
         let stderr = '';
-        child.stderr.on('data', (data) => {
+        // using stderr.once here for so that it creates this onw time only instead of creating each time when I save the file,
+        child.stderr.once('data', (data) => {
             stderr += data.toString();
         });
 
-        child.on('close', (code) => {
+        child.once('close', (code) => {
             if (code !== 0) {
                 return reject(new Error(`rsync exited with code ${code}: ${stderr}`));
             }
@@ -229,7 +296,7 @@ async _rsyncPut(localPath, remotePath,remote_server) {
         
 
                 const remote_server = Servers.get(hostname);
-                await remote_server._connectPromise;
+                // await remote_server._connectPromise;
 
                 const stat = await remote_server.sftp.stat(remotePath);
                 const mtime = stat.modifyTime;
@@ -242,8 +309,10 @@ async _rsyncPut(localPath, remotePath,remote_server) {
 
                     // Trigger change event, consumer will re-read
                     this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
+
                 }
             } catch (err) {
+                
                 console.error(`Watch error for ${remotePath}: ${err.message}`);
             }
         }, 2000); // faster than before (2s instead of 3s)
@@ -285,119 +354,130 @@ catch (err) {
     throw err;
 }
 }
-    refresh() {
-        this._emitter.fire(); // a bit hacky, but works well
-    }
+    // refresh() {
+    //     this._emitter.fire(); // a bit hacky, but works well
+    // }
     readDirectory() { return []; }
     createDirectory() {}
-    delete() {}
+  async delete(uri) {
+    // Tell VS Code the file is gone
+    this._emitter.fire([{ type: vscode.FileChangeType.Deleted, uri }]);
+
+    const Servers = await this.getServers();
+        
+
+    const remote_server = Servers.get(uri.authority);
+
+    // Clean up AixFS-internal state if you cached it
+    remote_server._lastModified.delete(uri.path);
+}
     rename() {}
 }
 
 
 
 
-class FileNode extends vscode.TreeItem {
-    constructor(label, collapsibleState, fullPath, isFolder = false) {
-        super(label, collapsibleState);
-        this.fullPath = fullPath;
-        this.isFolder = isFolder;
+// class FileNode extends vscode.TreeItem {
+//     constructor(label, collapsibleState, fullPath, isFolder = false) {
+//         super(label, collapsibleState);
+//         this.fullPath = fullPath;
+//         this.isFolder = isFolder;
 
-        this.resourceUri = vscode.Uri.file(fullPath); // now getting all local vscode features
+//         this.resourceUri = vscode.Uri.file(fullPath); // now getting all local vscode features
 
-        // Override only if you want to force a special icon
-        if (isFolder) {
-            this.iconPath = new vscode.ThemeIcon('folder');
-        }
+//         // Override only if you want to force a special icon
+//         if (isFolder) {
+//             this.iconPath = new vscode.ThemeIcon('folder');
+//         }
 
-        // If it's a file, allow opening
-        if (!isFolder) {
-            this.command = {
-                command: 'OpenFile',
-                title: 'Open File',
-                arguments: [this]
-            };
-        }
-    }
-}
+//         // If it's a file, allow opening
+//         if (!isFolder) {
+//             this.command = {
+//                 command: 'OpenFile',
+//                 title: 'Open File',
+//                 arguments: [this]
+//             };
+//         }
+//     }
+// }
 
 
-class AixExplorerProvider  {
-    constructor(getServersCallback,AllServers) {
-        // Instead of a static list, we use a callback that returns current servers
-        this.getServers = getServersCallback;
-        this.AllServers = AllServers;
-        this._emitter = new vscode.EventEmitter();
-        this.onDidChangeTreeData = this._emitter.event;
+// class AixExplorerProvider  {
+//     constructor(getServersCallback,AllServers) {
+//         // Instead of a static list, we use a callback that returns current servers
+//         this.getServers = getServersCallback;
+//         this.AllServers = AllServers;
+//         this._emitter = new vscode.EventEmitter();
+//         this.onDidChangeTreeData = this._emitter.event;
 
-    }
+//     }
 
-    getTreeItem(element) {
-        return element;
-    }
+//     getTreeItem(element) {
+//         return element;
+//     }
 
-  async OpenFile(file) {
-    const localPath = file.resourceUri.fsPath;
-    const Servers = await this.AllServers();
+//   async OpenFile(file) {
+//     const localPath = file.resourceUri.fsPath;
+//     const Servers = await this.AllServers();
 
-    // vscode.window.showInformationMessage(localPath," ");
+//     // vscode.window.showInformationMessage(localPath," ");
 
     
-    const server_name = await filetodirname(localPath);
-    const remote_server = await Servers.get(server_name); 
+//     const server_name = await filetodirname(localPath);
+//     const remote_server = await Servers.get(server_name); 
 
 
-    if (fs.existsSync(localPath)) {
+//     if (fs.existsSync(localPath)) {
         
-        // Open from local caffche first
-        let doc = await vscode.workspace.openTextDocument(localPath);
-        await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
-        // Open from remote via your custom provider
-        const remotePath = remote_server.localtoRemote.get(file.label);
-        const uri = vscode.Uri.from({
-            scheme: "aix",
-            authority: remote_server.AIX_HOST,
-            path: remotePath
-        });
-         doc = await vscode.workspace.openTextDocument(uri);
-        await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
-    }
-}
+//         // Open from local caffche first
+//         let doc = await vscode.workspace.openTextDocument(localPath);
+//         await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
+//         // Open from remote via your custom provider
+//         const remotePath = remote_server.localtoRemote.get(file.label);
+//         const uri = vscode.Uri.from({
+//             scheme: "aix",
+//             authority: remote_server.AIX_HOST,
+//             path: remotePath
+//         });
+//          doc = await vscode.workspace.openTextDocument(uri);
+//         await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
+//     }
+// }
 
-    async getChildren(element) {
-        if (!element) {
-            // Root level → dynamically get server list
-            const servers = await this.getServers(); // returns [{name, folder, isRemote}, ...]
-            return servers.map(server =>
-                new FileNode(
-                    server.name,
-                    vscode.TreeItemCollapsibleState.Collapsed,
-                    server.folder, // the local cache folder for this server
-                    true // it's a folder
-                )
-            );
-        }
+//     async getChildren(element) {
+//         if (!element) {
+//             // Root level → dynamically get server list
+//             const servers = await this.getServers(); // returns [{name, folder, isRemote}, ...]
+//             return servers.map(server =>
+//                 new FileNode(
+//                     server.name,
+//                     vscode.TreeItemCollapsibleState.Collapsed,
+//                     server.folder, // the local cache folder for this server
+//                     true // it's a folder
+//                 )
+//             );
+//         }
 
-        if (element.isFolder) {
-            // Same as before: read cached folder contents
-            const fs = require('fs');
-            const children = await fs.promises.readdir(element.fullPath, { withFileTypes: true });
-            return children.map(child =>
-                new FileNode(
-                    child.name,
-                    child.isDirectory() ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None,
-                    path.join(element.fullPath, child.name),
-                    child.isDirectory()
-                )
-            );
-        }
+//         if (element.isFolder) {
+//             // Same as before: read cached folder contents
+//             const fs = require('fs');
+//             const children = await fs.promises.readdir(element.fullPath, { withFileTypes: true });
+//             return children.map(child =>
+//                 new FileNode(
+//                     child.name,
+//                     child.isDirectory() ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None,
+//                     path.join(element.fullPath, child.name),
+//                     child.isDirectory()
+//                 )
+//             );
+//         }
 
-        return [];
-    }
-    refresh() {
-    this._emitter.fire(); // tells VSCode to call getChildren() again
-}
-}
+//         return [];
+//     }
+//     refresh() {
+//     this._emitter.fire(); // tells VSCode to call getChildren() again
+// }
+// }
 
 // class AIXTimeline
 // {
@@ -441,4 +521,4 @@ class AixExplorerProvider  {
 // }
 
 
-module.exports = {AixExplorerProvider,AixFSProvider};
+module.exports = {AixFSProvider,hash_path,Parenttodir};
