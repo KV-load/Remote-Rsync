@@ -89,8 +89,10 @@ class Server
         this.AIX_HOST = AIX_HOST;
         this.AIX_USER = AIX_USER;
         this.TEMP_DIR = TEMP_DIR;
+        this.rsync_path = 'opt/freeware/bin/rsync';
         this.localtoRemote = new Map();
         this._lastModified = new Map();
+        this._lastModified_size = new Map();
         this.sftp = new Client();
         this._connectPromise = null;
         
@@ -574,6 +576,48 @@ function TerminalLoader(userHost,Remote_server,Pyproc)
 
 }
 
+
+function RsyncPath(Remote_server)
+{
+    return new Promise((resolve, reject) => {
+        const whichRsync = spawn("ssh", [`${Remote_server.AIX_USER}@${Remote_server.AIX_HOST}`, "find / -name rsync 2>/dev/null | head -20"]);
+        
+        let rsyncPath = "";
+        let stderr = "";
+        whichRsync.stdout.on('data', (data) => {
+            rsyncPath = data.toString();
+            // Now ru
+        });
+
+        whichRsync.stderr.on('data', (data) => {
+            stderr += data.toString();
+        });
+
+        whichRsync.on('close', (code) => {
+            if(code !== 0) {
+                vscode.window.showErrorMessage(`Error finding rsync`);
+                reject(new Error(`Error: No such file or directory: ${stderr}`));
+            }
+
+            rsyncPath = rsyncPath.split('\n').find(p => p.trim().endsWith('rsync')) || '';
+                if (rsyncPath) {
+                    Remote_server.rsync_path = rsyncPath.trim();
+                    console.log(`Rsync path set to: ${Remote_server.rsync_path}`);
+                    resolve(Remote_server.rsync_path);
+                } else {
+                    console.warn("Rsync not found on remote, using default");
+                    resolve("");
+                }
+
+        });
+
+
+
+    });
+
+}
+
+
 async function Boot(userHost,Remote_server) {
     try {
         // Start your watcher
@@ -602,6 +646,10 @@ EOF`;
 
         //Setting the port in the server instance
         Remote_server.SetPort(port);
+
+        //Setting up the rsync path
+        await RsyncPath(Remote_server);
+        
 
         //Creat the terminal for reverse tunnel
         TerminalLoader(userHost,Remote_server,process);

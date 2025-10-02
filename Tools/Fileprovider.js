@@ -148,6 +148,7 @@ class AixFSProvider {
         // Save mtime
         const stat = await sftp.stat(remotePath);
         remote_server._lastModified.set(remotePath, stat.modifyTime);
+        remote_server._lastModified_size.set(remotePath, stat.size);
 
         // ✅ VS Code gets a single clean buffer load
         return fs.readFileSync(localPath);
@@ -182,6 +183,7 @@ class AixFSProvider {
                                                                                 //When that file changes on disk → VS Code sees it as an external change → it closes/reloads the whole buffer → flicker, "file reloaded" message, cursor reset, etc.
          
                 remote_server._lastModified.set(remotePath, stats.modifyTime);
+                remote_server._lastModified_size.set(remotePath, stats.size);
                 return fs.readFileSync(localPath);
 
             } else {
@@ -256,6 +258,7 @@ async streamfetch(sftp,remotePath,localPath) // for fetching the data from the f
 
             const stat = await remote_server.sftp.stat(remotePath);
             remote_server._lastModified.set(remotePath, stat.modifyTime);
+            remote_server._lastModified_size.set(remotePath, stat.size);
 
             this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
         } catch (err) {
@@ -264,27 +267,32 @@ async streamfetch(sftp,remotePath,localPath) // for fetching the data from the f
 }
 
     // Helper
-async _rsyncPut(localPath, remotePath,remote_server) {
+async _rsyncPut(localPath, remotePath, remote_server) {
     return new Promise((resolve, reject) => {
-        const cmd = 'rsync';
-        const args = ['-z', localPath, `${remote_server.AIX_USER}@${remote_server.AIX_HOST}:${remotePath}`];
+        // First, check rsync path
 
-        const child = spawn(cmd, args);
+        let rsyncPath = remote_server.rsync_path || '';
+            // Now run rsync
+            const args = ["-z", localPath,`--rsync-path=${rsyncPath}`,`${remote_server.AIX_USER}@${remote_server.AIX_HOST}:${remotePath}`];
+            const child = spawn("rsync", args);
 
-        let stderr = '';
-        // using stderr.once here for so that it creates this onw time only instead of creating each time when I save the file,
-        child.stderr.once('data', (data) => {
-            stderr += data.toString();
-        });
+            let stderr = "";
 
-        child.once('close', (code) => {
-            if (code !== 0) {
-                return reject(new Error(`rsync exited with code ${code}: ${stderr}`));
-            }
-            resolve();
-        });
+            // collect all stderr, not just first chunk
+            child.stderr.on("data", (data) => {
+                stderr += data.toString();
+            });
+
+            child.once("close", (code) => {
+                if (code !== 0) {
+                    return reject(new Error(`rsync exited with code ${code}: ${stderr}`));
+                }
+                resolve();
+            });
+        
     });
 }
+
     watch(uri, options) {
         const remotePath = uri.path;
         const hostname = uri.authority;
@@ -301,10 +309,30 @@ async _rsyncPut(localPath, remotePath,remote_server) {
                 const stat = await remote_server.sftp.stat(remotePath);
                 const mtime = stat.modifyTime;
                 const lastMtime = remote_server._lastModified.get(remotePath);
+                const lastsize = remote_server._lastModified_size.get(remotePath);
+
+
+                // bool to have the trigger event only once when the file is created
+                let file_changed = false;
+
+                // check if size has changed
+                const size = stat.size;
+
+                if(!lastsize)
+                {
+                    remote_server._lastModified_size.set(remotePath, size);
+                }
+                else if(size !== lastsize)
+                {
+                    remote_server._lastModified_size.set(remotePath, size);
+                    file_changed = true;
+                    this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
+
+                }
 
                 if (!lastMtime) {
                     remote_server._lastModified.set(remotePath, mtime);
-                } else if (mtime !== lastMtime) {
+                } else if (mtime !== lastMtime && !file_changed) {
                     remote_server._lastModified.set(remotePath, mtime);
 
                     // Trigger change event, consumer will re-read
@@ -312,10 +340,10 @@ async _rsyncPut(localPath, remotePath,remote_server) {
 
                 }
             } catch (err) {
-                
+
                 console.error(`Watch error for ${remotePath}: ${err.message}`);
             }
-        }, 2000); // faster than before (2s instead of 3s)
+        }, 3000); // faster than before (2s instead of 3s)
 
         return new vscode.Disposable(() => clearInterval(interval));
     }
@@ -370,6 +398,7 @@ catch (err) {
 
     // Clean up AixFS-internal state if you cached it
     remote_server._lastModified.delete(uri.path);
+    remote_server._lastModified_size.delete(uri.path);
 }
     rename() {}
 }
