@@ -1,3 +1,4 @@
+
 const util = require('util');
 const exec = util.promisify(require('child_process').exec);
 const spawn = require('child_process').spawn;
@@ -6,7 +7,7 @@ const path = require('path');
 const vscode = require('vscode');
 const chokidar = require('chokidar');
 
-const {Cscope} = require('./Tools/cscope').Cscope;
+const {Cscope,queryCscope} = require('./Tools/cscope');
 
 const Client = require('ssh2-sftp-client')
 
@@ -177,6 +178,23 @@ context.subscriptions.push(
 // )
 // );
  // 👇 Register listener globally during activation, not inside a command
+    const open_document = vscode.workspace.onDidOpenTextDocument(async(document)=>
+    {
+        if(!uriLocaltoRemote.get(document.uri.toString()) ||  document.uri.scheme != 'aix' )
+        {
+            const frag  = new URLSearchParams(document.uri.fragment);
+
+            const remote_path = frag.get("file");
+            const remote_server = frag.get("Server");
+
+            pullFromAix(remote_path,remote_server);
+
+
+        }
+    });
+
+
+
     const editorChangeDisposable = vscode.window.onDidChangeActiveTextEditor((editor) => {
         vscode.window.showInformationMessage("Active file changed");
 
@@ -194,6 +212,96 @@ context.subscriptions.push(
         activeWatcher = provider.watch(remote_uri);
     });
 
+
+
+    // Setting up the command to search for the functions using cscope
+    const def_search = vscode.languages.registerDefinitionProvider(['cpp','c'],{
+        async provideDefinition(document, position, token) {
+
+        // const builtinDefs = await vscode.commands.executeCommand(
+        // 'vscode.executeDefinitionProvider',
+        // document.uri,
+        // position
+        // );
+
+        // if((builtinDefs instanceof Array)  && builtinDefs.length > 0){
+        //     let defs = builtinDefs.map(d=>d.uri);
+        //     console.log("Builtin defins mounted");
+        //     console.log("Line start " + position.line);
+        //     return defs;
+        // }
+
+
+        vscode.window.showInformationMessage(`Server restart successful`);
+
+
+
+        //Getting the server name from the uri
+
+        //getting metadata from the uri
+        const frag = new URLSearchParams(document.uri.fragment);
+
+        const server_name = frag.get('Server').split('@')[1];
+
+        
+        const cur_server = Servers.get(server_name);
+
+
+        const dir_name = frag.get('cscope_dir');  // getting the root directory of the project.
+        const scopeFile = path.join(dir_name,'cscope.out'); // getting the cscope.out.
+
+        // Getting my old cscope logic
+        let remoteResult=[];
+        const symbol = document.getText(document.getWordRangeAtPosition(position));
+        remoteResult = await queryCscope(scopeFile,"1",symbol,cur_server);
+
+        if(!remoteResult){return[];}
+
+        // console.log(`Found ${remoteResult[remoteResult.length-1]} results for query on Aix`);
+        let remote_filepath="";
+        let result= [];
+        let uri=null;
+        for(const entry of remoteResult)
+        {
+            remote_filepath = path.join(dir_name,entry.file);
+            vscode.window.showInformationMessage(remote_filepath);
+
+            // await pullFromAix(remote_filepath,cur_server,"Nopen"); //Don't want to open the file direclty when user clicks on it then it will be opened.
+            // uri = [...uriLocaltoRemote].find(([local, remote]) => remote.path === remote_filepath)?.[0];
+            // uri=vscode.Uri.parse(uri);
+            // if(!uri)
+            // {
+            //     continue;
+            // }
+
+                const localFile = await hash_path(remote_filepath,cur_server);
+
+
+               
+
+                // Creating the fragment for the uri
+                const frag = new URLSearchParams({
+                Server: `${cur_server.AIX_USER}@${cur_server.AIX_HOST}`,
+                file: dir_name
+                }).toString();
+
+                // setting up the local uri
+                uri = vscode.Uri.from({
+                scheme: "aix",
+                authority: cur_server.AIX_HOST,
+                path: remote_filepath,
+            });
+                uri = uri.with({fragment: frag});
+
+           console.log(uri.path);
+
+            const pos = new vscode.Position(entry.line - 1, 0);
+            result.push(new vscode.Location(uri, pos));
+        }
+        return result;
+        
+    }
+});
 
 
 
@@ -243,9 +351,9 @@ context.subscriptions.push(
         TEMP_DIR = path.join(mount_dir, `temp_${AIX_HOST}`);
         LOCAL_COMMAND_FILE = path.join(LOCAL_SYNC_DIR, `command_${AIX_HOST}.txt`);
         
+        fs.writeFileSync(LOCAL_COMMAND_FILE,'');
 
-
-          let Remote_server = new Server(LOCAL_COMMAND_FILE,AIX_HOST,AIX_USER,TEMP_DIR);
+        let Remote_server = new Server(LOCAL_COMMAND_FILE,AIX_HOST,AIX_USER,TEMP_DIR);
 
         await mountSSHFS(context, value,Remote_server);  //Setting up the server
 
@@ -422,6 +530,8 @@ vscode.window.onDidCloseTerminal((closedTerm) => {
     context.subscriptions.push(editorChangeDisposable);
     context.subscriptions.push(disposable);
     context.subscriptions.push(disposable2);
+    context.subscriptions.push(def_search);
+    context.subscriptions.push(open_document);
 }
 
 
@@ -449,26 +559,20 @@ function watchCommandFile(Remote_server) {
 
     chokidar.watch(Remote_server.LOCAL_COMMAND_FILE).on('change', () => {
         let target = fs.readFileSync(Remote_server.LOCAL_COMMAND_FILE, 'utf8').trim();
-        let dir = '';
+        let remote_dir = '';
         let newtarget = '';
-        let size = "";
         if(target && target.includes('::'))
         {
             newtarget = target.split('::')[1].trim();
-            size  = newtarget.split('@')[1].trim();
-            newtarget = newtarget.split('@')[0].trim();
-            dir = target.split('::')[0].trim();
-            pullFromAix(newtarget,Remote_server);
+            remote_dir = target.split('::')[0].trim();
+            pullFromAix(newtarget,Remote_server,remote_dir);
 
-            dir = target.split('::')[0].trim();
-            // Cscope(Remote_server,dir,mount_dir);
+            // Cscope(Remote_server,remote_dir);
 
 
         }
         else if (target) {
-            newtarget = target.split('@')[0].trim();
-            size  = target.split('@')[1].trim();
-            pullFromAix(newtarget,Remote_server);
+            pullFromAix(target,Remote_server);
         }
     });
 }
@@ -476,7 +580,7 @@ function watchCommandFile(Remote_server) {
 
 
 
-async function pullFromAix(remotePath,Remote_server) {
+async function pullFromAix(remotePath,Remote_server,remote_dir) {
     remotePath = path.posix.normalize(remotePath);
     // Explorer.refresh();
 
@@ -491,16 +595,32 @@ async function pullFromAix(remotePath,Remote_server) {
 
         const localFile = await hash_path(remotePath,Remote_server);
 
+
         // Remote_server.updateLocalToRemote(path.basename(remotePath),remotePath); 
 
-            let local_uri = vscode.Uri.file(localFile);
-            // local_uri = local_uri.with({fragment: `${Date.now()}`});
+        // Creating the fragment for the uri
+        const frag = new URLSearchParams({
+        Server: `${Remote_server.AIX_USER}@${Remote_server.AIX_HOST}`,
+        cscope_dir: remote_dir
+        }).toString();
 
-      uriLocaltoRemote.set(local_uri.toString(),uri);
+        // setting up the local uri
+        let local_uri = vscode.Uri.file(localFile);
+        local_uri = local_uri.with({fragment: frag});
+        
+        if(!uriLocaltoRemote.get(local_uri.toString()))
+        {
+            uriLocaltoRemote.set(local_uri.toString(),uri);
 
-    await vscode.workspace.openTextDocument(uri);
-    const local_file = await vscode.workspace.openTextDocument(local_uri);
-    await vscode.window.showTextDocument(local_file, { preview: true, preserveFocus: true });
+            await vscode.workspace.openTextDocument(uri);
+            const local_file = await vscode.workspace.openTextDocument(local_uri);
+              
+            if(remote_dir && remote_dir==="Nopen")
+            {return;}
+            await vscode.window.showTextDocument(local_file, { preview: true, preserveFocus: true });
+        }
+
+  
     
 }
 
@@ -577,10 +697,12 @@ function TerminalLoader(userHost,Remote_server,Pyproc)
 }
 
 
-function RsyncPath(Remote_server)
+// function to find the path of the different tools on the remote aix server
+
+function ToolPath(Remote_server,tool)
 {
     return new Promise((resolve, reject) => {
-        const whichRsync = spawn("ssh", [`${Remote_server.AIX_USER}@${Remote_server.AIX_HOST}`, "find / -name rsync 2>/dev/null | head -20"]);
+        const whichRsync = spawn("ssh", [`${Remote_server.AIX_USER}@${Remote_server.AIX_HOST}`, `find /opt/freeware/bin -name ${tool} 2>/dev/null | head -3`]);
         
         let rsyncPath = "";
         let stderr = "";
@@ -595,27 +717,37 @@ function RsyncPath(Remote_server)
 
         whichRsync.on('close', (code) => {
             if(code !== 0) {
-                vscode.window.showErrorMessage(`Error finding rsync`);
+                vscode.window.showErrorMessage(`Error finding ${tool}`);
                 reject(new Error(`Error: No such file or directory: ${stderr}`));
             }
 
-            rsyncPath = rsyncPath.split('\n').find(p => p.trim().endsWith('rsync')) || '';
-                if (rsyncPath) {
-                    Remote_server.rsync_path = rsyncPath.trim();
-                    console.log(`Rsync path set to: ${Remote_server.rsync_path}`);
-                    resolve(Remote_server.rsync_path);
+            rsyncPath = rsyncPath.split('\n').find(p => p.trim().endsWith(`${tool}`)) || '';
+                if (rsyncPath ) {
+                    if(tool === 'rsync')  
+                        {
+                            Remote_server.rsync_path = rsyncPath.trim();
+                            resolve(Remote_server.rsync_path);
+                            console.log(`${tool} path set to: ${Remote_server.rsync_path}`);
+                        }  
+                        else{
+                            rsyncPath = rsyncPath.trim();
+                            resolve(rsyncPath);
+                            console.log(`${tool} path set to: ${rsyncPath}`);
+
+                        }             
+                        
+
                 } else {
-                    console.warn("Rsync not found on remote, using default");
+                    console.warn(`${tool} not found on remote, using default`);
                     resolve("");
                 }
 
         });
 
-
-
     });
 
 }
+
 
 
 async function Boot(userHost,Remote_server) {
@@ -625,6 +757,7 @@ async function Boot(userHost,Remote_server) {
 
         console.log("Now safe to continue. Using port:", port);
 
+        const sed_path = await ToolPath(Remote_server,'sed');
         // Replace placeholder with port
         let finalSafeCode = safeCode.replace('VS_PORT', port);
 
@@ -632,7 +765,7 @@ async function Boot(userHost,Remote_server) {
 const sshCmd = `
 ssh -o StrictHostKeyChecking=no ${userHost} 'bash -s' <<'EOF'
 if grep '^[[:space:]]*code[[:space:]]*\(\)[[:space:]]*{' "$HOME/.bashrc"; then
-    sed -i '/^[[:space:]]*code[[:space:]]*\(\)[[:space:]]*{/,/^[[:space:]]*}/d' "$HOME/.bashrc"
+    ${sed_path} -i '/^[[:space:]]*code[[:space:]]*\(\)[[:space:]]*{/,/^[[:space:]]*}/d' "$HOME/.bashrc"
 fi
 cat <<'EOC' >> "$HOME/.bashrc"
 ${finalSafeCode}
@@ -648,7 +781,7 @@ EOF`;
         Remote_server.SetPort(port);
 
         //Setting up the rsync path
-        await RsyncPath(Remote_server);
+        await ToolPath(Remote_server,"rsync");
         
 
         //Creat the terminal for reverse tunnel
@@ -694,7 +827,6 @@ try {
 
     let keyPath = `${process.env.HOME}/.ssh/id_rsa_${Remote_server.AIX_HOST}`;
 
-    Remote_server.Setkeypath(keyPath);
 
 
 
@@ -803,6 +935,9 @@ Host ${Remote_server.AIX_HOST}
                         console.log(`SSH config for ${Remote_server.AIX_HOST} added.`);
                     }
                 }
+
+                // Setting up the key now starting a sftp connection
+                Remote_server.Setkeypath(keyPath);
 
                 // Append if not found
                

@@ -9,8 +9,6 @@ const util = require('util');
 const exec = util.promisify(require('child_process').exec);
 const spawn = require('child_process').spawn;
 
-const crypto =require('crypto');
-
 //function to get the dir name from the file_name
 
 const Parenttodir = new Map();  // to store the pathways for the parent remote dir and the folder.
@@ -56,6 +54,10 @@ async function hash_path(remotePath,Remote_server)
     else{
         console.log("Creating new folder for ",parent," inside ",Remote_server.TEMP_DIR);
         local_dirname = path.join(Remote_server.TEMP_DIR,path.basename(parent));
+        if(local_dirname==="")
+        {
+            local_dirname="HOME";
+        }
         local_dirname = local_dirname + "@0";
 
         // to check if the folder already exists then just create a one cntr_more;
@@ -318,27 +320,30 @@ async _rsyncPut(localPath, remotePath, remote_server) {
                 // check if size has changed
                 const size = stat.size;
 
-                if(!lastsize)
-                {
-                    remote_server._lastModified_size.set(remotePath, size);
-                }
-                else if(size !== lastsize)
-                {
-                    remote_server._lastModified_size.set(remotePath, size);
+
+                  if (!lastMtime) {
+                    remote_server._lastModified.set(remotePath, mtime);
+                } else if (mtime !== lastMtime ) {
+                    remote_server._lastModified.set(remotePath, mtime);
                     file_changed = true;
-                    this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
-
-                }
-
-                if (!lastMtime) {
-                    remote_server._lastModified.set(remotePath, mtime);
-                } else if (mtime !== lastMtime && !file_changed) {
-                    remote_server._lastModified.set(remotePath, mtime);
-
                     // Trigger change event, consumer will re-read
                     this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
 
                 }
+
+                if(!lastsize)
+                {
+                    remote_server._lastModified_size.set(remotePath, size);
+                }
+                else if(size !== lastsize && !file_changed)
+                {
+                    remote_server._lastModified_size.set(remotePath, size);
+                    
+                    this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
+
+                }
+
+              
             } catch (err) {
 
                 console.error(`Watch error for ${remotePath}: ${err.message}`);
