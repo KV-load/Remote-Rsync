@@ -180,15 +180,16 @@ context.subscriptions.push(
  // 👇 Register listener globally during activation, not inside a command
     const open_document = vscode.workspace.onDidOpenTextDocument(async(document)=>
     {
-        if(document.uri.scheme == 'fake_aix' && !uriLocaltoRemote.get(document.uri.toString()) )
+        vscode.window.showInformationMessage("opentextdocument triggered");
+
+        if(document.uri.scheme === 'aix' && document.uri.fragment !== undefined)
         {
+            vscode.window.showInformationMessage("Provider triggered");
             const frag  = new URLSearchParams(document.uri.fragment);
 
             const remote_path = frag.get("file");
-            let remote_server = frag.get("Server");  //getting the name of the server
-
-            remote_server = remote_server.split('@')[1];      
-            remote_server = Servers.get(remote_server);
+       
+            const remote_server = Servers.get(document.uri.authority);
 
 
             pullFromAix(remote_path,remote_server);
@@ -291,7 +292,7 @@ context.subscriptions.push(
 
                 // setting up the fake uri so that i just see the repo only not the whole files fetched and then whichever file I click will be fetched.
                 uri = vscode.Uri.from({
-                scheme: "fake_aix",
+                scheme: "aix",
                 authority: cur_server.AIX_HOST,
                 path: remote_filepath,
             });
