@@ -69,17 +69,17 @@ class ServerReload {
 
 
 // Global map to store all server instances
-const Servers = new Map();
-const Listeners = new Map();
-const uriLocaltoRemote = new Map();
+const Servers = new Map();   // Map to  map hostip id to the Server class
+const Listeners = new Map(); // Map tp store the pythonlistener that I have created for each of the terminal to stop them at last
+const uriLocaltoRemote = new Map(); // Map to store the local uri to remote uri.
 
 
 
 // common to all servers
-let LOCAL_SYNC_DIR = '';
-let mount_dir = '';
-let watcherScript = '';
-let safeCode ='';
+let LOCAL_SYNC_DIR = ''; // My local dir where I am keeping the command
+let mount_dir = ''; // My mount_Dir where all these servers dir will be placed.
+let watcherScript = ''; // Watcherscript python which do the checking on command.txt
+let safeCode ='';  // code to be pasted on the remote to make this code command work.
 // let Explorer = null;
 
 class Server
@@ -180,12 +180,16 @@ context.subscriptions.push(
  // 👇 Register listener globally during activation, not inside a command
     const open_document = vscode.workspace.onDidOpenTextDocument(async(document)=>
     {
-        if(!uriLocaltoRemote.get(document.uri.toString()) ||  document.uri.scheme != 'aix' )
+        if(document.uri.scheme == 'fake_aix' && !uriLocaltoRemote.get(document.uri.toString()) )
         {
             const frag  = new URLSearchParams(document.uri.fragment);
 
             const remote_path = frag.get("file");
-            const remote_server = frag.get("Server");
+            let remote_server = frag.get("Server");  //getting the name of the server
+
+            remote_server = remote_server.split('@')[1];      
+            remote_server = Servers.get(remote_server);
+
 
             pullFromAix(remote_path,remote_server);
 
@@ -285,9 +289,9 @@ context.subscriptions.push(
                 file: dir_name
                 }).toString();
 
-                // setting up the local uri
+                // setting up the fake uri so that i just see the repo only not the whole files fetched and then whichever file I click will be fetched.
                 uri = vscode.Uri.from({
-                scheme: "aix",
+                scheme: "fake_aix",
                 authority: cur_server.AIX_HOST,
                 path: remote_filepath,
             });
@@ -580,7 +584,7 @@ function watchCommandFile(Remote_server) {
 
 
 
-async function pullFromAix(remotePath,Remote_server,remote_dir) {
+async function pullFromAix(remotePath,Remote_server,remote_dir="") {
     remotePath = path.posix.normalize(remotePath);
     // Explorer.refresh();
 
@@ -608,17 +612,24 @@ async function pullFromAix(remotePath,Remote_server,remote_dir) {
         let local_uri = vscode.Uri.file(localFile);
         local_uri = local_uri.with({fragment: frag});
         
-        if(!uriLocaltoRemote.get(local_uri.toString()))
+        let local_file=null;
+        if(uriLocaltoRemote.get(local_uri.toString()))
+        {
+            local_file = await vscode.workspace.openTextDocument(local_uri);
+        }
+        else
         {
             uriLocaltoRemote.set(local_uri.toString(),uri);
 
             await vscode.workspace.openTextDocument(uri);
-            const local_file = await vscode.workspace.openTextDocument(local_uri);
+            local_file = await vscode.workspace.openTextDocument(local_uri);
+
               
             if(remote_dir && remote_dir==="Nopen")
             {return;}
-            await vscode.window.showTextDocument(local_file, { preview: true, preserveFocus: true });
         }
+
+        await vscode.window.showTextDocument(local_file, { preview: true, preserveFocus: true });
 
   
     
