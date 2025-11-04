@@ -11,8 +11,6 @@ const spawn = require('child_process').spawn;
 
 //function to get the dir name from the file_name
 
-const Parenttodir = new Map();  // to store the pathways for the parent remote dir and the folder.
-
  
 async function filetodirname(localPath) {
     let temp_str ="";
@@ -44,20 +42,25 @@ async function hash_path(remotePath,Remote_server)
 {
     const base = path.basename(remotePath); 
 
-    const parent = path.dirname(remotePath); // e.g. project1
+    let parent = path.dirname(remotePath); // e.g. project1
+
+    // console.log("hash_path",base,"  parent.  ", parent);
+
+    if(parent==="/")
+    {
+        parent="HOME";
+    }
 
     let local_dirname = '';
 
-    if(Parenttodir.get(parent)){
-        local_dirname = Parenttodir.get(parent);
+    if(Remote_server.localfoldertoRemote.get(parent)){ // here I am checking if the parent directory already has a local folder created for it or not.
+        local_dirname = Remote_server.localfoldertoRemote.get(parent);
     }
     else{
         console.log("Creating new folder for ",parent," inside ",Remote_server.TEMP_DIR);
+
+
         local_dirname = path.join(Remote_server.TEMP_DIR,path.basename(parent));
-        if(local_dirname==="")
-        {
-            local_dirname="HOME";
-        }
         local_dirname = local_dirname + "@0";
 
         // to check if the folder already exists then just create a one cntr_more;
@@ -69,8 +72,10 @@ async function hash_path(remotePath,Remote_server)
         cnt++;
         local_dirname = `${dirname}@${cnt}`;
         }
+       fs.mkdirSync(local_dirname, { recursive: true });
+
         console.log(local_dirname);
-        Parenttodir.set(parent,local_dirname);
+        Remote_server.localfoldertoRemote.set(parent,local_dirname);
     }
 
 
@@ -95,7 +100,6 @@ async function hash_path(remotePath,Remote_server)
     const local_path = path.join(local_dirname, base);
 
 
-    fs.mkdirSync(local_dirname, { recursive: true });
         
 
     //creating directory inside it saving the files with same name 
@@ -127,7 +131,6 @@ class AixFSProvider {
         this._emitter = new vscode.EventEmitter();
         this.onDidChangeFile = this._emitter.event;
     }
-
     async readFile(uri) {
         // await this._connectPromise;
         const Servers = await this.getServers();
@@ -144,11 +147,13 @@ class AixFSProvider {
         const sftp = remote_server.sftp;
 
     try {
+
+    console.log("Path read is " + localPath);
         
        await this.streamfetch(sftp, remotePath, localPath);
 
         // Save mtime
-        const stat = await sftp.stat(remotePath);
+        const stat = await this.stat(remotePath,remote_server);
         remote_server._lastModified.set(remotePath, stat.modifyTime);
         remote_server._lastModified_size.set(remotePath, stat.size);
 
@@ -167,13 +172,13 @@ class AixFSProvider {
         }
         try {
             // Try resolving symlinks
-            let stats = await remote_server.sftp.stat(remotePath);
+            let stats = await this.stat(remotePath,remote_server);
             let new_remotePath = remotePath;
 
             if ((stats.mode & 0o170000) !== 0o100000) {
                 console.log(`Resolving ${remotePath} (not a regular file)`);
                 new_remotePath = await remote_server.sftp.realPath(remotePath);
-                stats = await remote_server.sftp.stat(new_remotePath);
+                stats = await this.stat(new_remotePath,remote_server);
             }
 
             if ((stats.mode & 0o170000) === 0o100000) {
@@ -210,30 +215,47 @@ class AixFSProvider {
     }
 }
 
-async streamfetch(sftp,remotePath,localPath) // for fetching the data from the files in smooth way not waiting to fetch whole data.
-{
-        const tmpPath = localPath + ".part";  // temp file during download
+async streamfetch(sftp, remotePath, localPath) {
+    vscode.window.setStatusBarMessage(`📡 Streaming file from AIX: ${remotePath}`, 2000);
 
-        vscode.window.setStatusBarMessage(`Streaming file from AIX: ${remotePath}`, 2000);
+    // open in append mode so it doesn’t conflict with VSCode buffer
+    const writeStream = fs.createWriteStream(localPath, {
+        flags: 'w',    // append mode instead of overwrite
+        encoding: 'utf8',
+        autoClose: true
+    });
 
-        const readStream = sftp.createReadStream(remotePath);
-        const writeStream = fs.createWriteStream(tmpPath);
+    const readStream = await sftp.createReadStream(remotePath);
 
-        // using readstream.once here for so that it creates this onw time only instead of creating each time when I save the file,
-
-        await new Promise((resolve, reject) => {
-            readStream
-                .once("error", reject)
-                .pipe(writeStream)
-                .once("error", reject)
-                .once("finish", resolve);
-        });
-
-        // 🔄 atomic replace: tmp → local
-        
-        fs.renameSync(tmpPath, localPath);
-
+    await new Promise((resolve, reject) => {
+        readStream
+            .on('data', chunk => {
+                // write smoothly; pause/resume if needed
+                if (!writeStream.write(chunk)) {
+                    readStream.pause();
+                    writeStream.once('drain', () => readStream.resume());
+                }
+            })
+            .once('end', async () => {
+                writeStream.end();
+                vscode.window.setStatusBarMessage(`✅ Finished streaming ${remotePath}`, 2000);
+                try {
+                    // 🔄 Force reload the open document
+                    const doc = await vscode.workspace.openTextDocument(localPath);
+                    await vscode.commands.executeCommand('workbench.action.files.revert', doc.uri);
+                } catch (err) {
+                    console.error('Failed to reload:', err);
+                }
+                resolve();
+            })
+            .once('error', err => {
+                writeStream.destroy();
+                vscode.window.showErrorMessage(`Stream error: ${err.message}`);
+                reject(err);
+            });
+    });
 }
+
 
     async writeFile(uri, content, options) {
         const hostname = uri.authority;
@@ -258,7 +280,7 @@ async streamfetch(sftp,remotePath,localPath) // for fetching the data from the f
 
             await this._rsyncPut(tmpFile, remotePath,remote_server);
 
-            const stat = await remote_server.sftp.stat(remotePath);
+            const stat = await this.stat(remotePath,remote_server);
             remote_server._lastModified.set(remotePath, stat.modifyTime);
             remote_server._lastModified_size.set(remotePath, stat.size);
 
@@ -308,7 +330,7 @@ async _rsyncPut(localPath, remotePath, remote_server) {
                 const remote_server = Servers.get(hostname);
                 // await remote_server._connectPromise;
 
-                const stat = await remote_server.sftp.stat(remotePath);
+                const stat = await this.stat(remotePath,remote_server);
                 const mtime = stat.modifyTime;
                 const lastMtime = remote_server._lastModified.get(remotePath);
                 const lastsize = remote_server._lastModified_size.get(remotePath);
@@ -327,7 +349,7 @@ async _rsyncPut(localPath, remotePath, remote_server) {
                     remote_server._lastModified.set(remotePath, mtime);
                     file_changed = true;
                     // Trigger change event, consumer will re-read
-                    this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
+                    this.readFile(uri);
 
                 }
 
@@ -337,15 +359,20 @@ async _rsyncPut(localPath, remotePath, remote_server) {
                 }
                 else if(size !== lastsize && !file_changed)
                 {
+                    file_changed = true;
                     remote_server._lastModified_size.set(remotePath, size);
                     
-                    this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
+                    this.readFile(uri);
 
                 }
 
+                if(file_changed)
+                {
+                    console.log("FIles has changed on AIX:",remotePath);
+                }
               
             } catch (err) {
-
+                
                 console.error(`Watch error for ${remotePath}: ${err.message}`);
             }
         }, 3000); // faster than before (2s instead of 3s)
@@ -353,14 +380,10 @@ async _rsyncPut(localPath, remotePath, remote_server) {
         return new vscode.Disposable(() => clearInterval(interval));
     }
 
-    async stat(uri) {
-    const Servers = await this.getServers();
-
-
-    const hostname = uri.authority;
-    const remote_server = Servers.get(hostname);
+    async stat(remote_path,remote_server) {
+    
     try{
-    const stats = await remote_server.sftp.stat(uri.path);
+    const stats = await remote_server.sftp.stat(remote_path);
     
 
     return {
@@ -555,4 +578,7 @@ catch (err) {
 // }
 
 
-module.exports = {AixFSProvider,hash_path,Parenttodir};
+
+
+
+module.exports = {AixFSProvider,hash_path};
