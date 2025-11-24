@@ -90,6 +90,8 @@ class Server
         this.AIX_USER = AIX_USER;
         this.TEMP_DIR = TEMP_DIR;
         this.rsync_path = 'opt/freeware/bin/rsync';
+        this.sed_path = '';
+        this.osname = '';
         this.localtoRemote = new Map();
         this._lastModified = new Map();
         this._lastModified_size = new Map();
@@ -108,10 +110,10 @@ class Server
 
     }
 
-    SetPort(port)
-    {
-        this.port = port;
-    }
+    // SetPort(port)
+    // {
+    //     this.port = port;
+    // }
 
     CreatingTempDir()
     {
@@ -130,14 +132,14 @@ class Server
             });
     }
 
-      // --- NEW: serialize/deserialize helpers ---
+    //   // --- NEW: serialize/deserialize helpers ---
     toJSON() {
         return {
             LOCAL_COMMAND_FILE: this.LOCAL_COMMAND_FILE,
             AIX_HOST: this.AIX_HOST,
             AIX_USER: this.AIX_USER,
             TEMP_DIR: this.TEMP_DIR,
-            port: this.port,
+            // port: this.port,
             keyPath: this.keyPath,
             localtoRemote: [...this.localtoRemote]
         };
@@ -145,7 +147,7 @@ class Server
 
     static fromJSON(obj) {
         const s = new Server(obj.LOCAL_COMMAND_FILE, obj.AIX_HOST, obj.AIX_USER, obj.TEMP_DIR);
-        s.port = obj.port;
+        // s.port = obj.port;
         s.keyPath = obj.keyPath;
         s.localtoRemote = new Map(obj.localtoRemote || []);
         return s;
@@ -198,7 +200,6 @@ const virtualProvider = {
         cscope_dir: cscope_Dir,
         }).toString();
 
-        
 
         aix_uri = aix_uri.with({fragment: frag});
 
@@ -344,7 +345,8 @@ const saving_Doc =  //Saving the files which will be done by my custom fs.
     // Setting up the command to search for the functions using cscope
     const def_search = vscode.languages.registerDefinitionProvider(['cpp','c'],{
         async provideDefinition(document, position, token) {
-            const result = await vscodeQuery(provider,uriLocaltoRemote,document,position,Servers,"define"); //provider is the class that do all backend work of file seinzing and other things.
+            const remote_uri = uriLocaltoRemote.get(document.uri.toString());
+            const result = await vscodeQuery(provider,remote_uri,document,position,Servers,"define"); //provider is the class that do all backend work of file seinzing and other things.
             return result;
         }
         
@@ -354,7 +356,8 @@ const saving_Doc =  //Saving the files which will be done by my custom fs.
     const def_refrence = vscode.languages.registerReferenceProvider(['cpp','c'],
         {
              async provideReferences(document, position, token) {
-                const result = await vscodeQuery(provider,uriLocaltoRemote,document,position,Servers,"refrences");
+                const remote_uri = uriLocaltoRemote.get(document.uri.toString());
+                const result = await vscodeQuery(provider,remote_uri,document,position,Servers,"refrences");
                 return result;
                 
              }
@@ -689,7 +692,7 @@ async function pullFromAix(remotePath,Remote_server,remote_dir="") {
         catch (err) {
             if(err.message.includes("Failed to reload: CodeExpectedError: cannot open file"))
             {
-                vscode.commands.executeCommand('vscode.open',local_uri);
+                await vscode.commands.executeCommand('vscode.open',local_uri);
             }
         }
 
@@ -751,7 +754,7 @@ function startWatcher(watcherScript,Remote_server) {
 }
 
 
-function TerminalLoader(userHost,Remote_server,Pyproc)
+function TerminalLoader(userHost,Remote_server,Pyproc,Remote_server_port)
 {
      // Create (or reuse) a VS Code terminal
         const terminal = vscode.window.createTerminal({ name: `${Remote_server.AIX_HOST}_Terminal` });
@@ -759,7 +762,7 @@ function TerminalLoader(userHost,Remote_server,Pyproc)
         terminal.show();
 
         // Send reverse SSH tunnel command
-        const forwardCmd = `ssh -R ${Remote_server.port}:localhost:${Remote_server.port}  \
+        const forwardCmd = `ssh -R ${Remote_server_port}:localhost:${Remote_server_port}  \
   -o StrictHostKeyChecking=no \
   -o ServerAliveInterval=10 -o ServerAliveCountMax=3 ${userHost}`;
         terminal.sendText(forwardCmd, true);
@@ -775,12 +778,23 @@ function TerminalLoader(userHost,Remote_server,Pyproc)
 function ToolPath(Remote_server,tool)
 {
     return new Promise((resolve, reject) => {
-        const whichRsync = spawn("ssh", [`${Remote_server.AIX_USER}@${Remote_server.AIX_HOST}`, `find /opt/freeware/bin -name ${tool} 2>/dev/null | head -3`]);
+
+        let default_path = '';
+
+        if(Remote_server.osname === "AIX")
+        {
+            default_path = '/opt/freeware/bin';
+        }
+        else if(Remote_server.osname === "Linux")
+        {
+            default_path = '/usr/bin';
+        }
+        const whichRsync = spawn("ssh", [`${Remote_server.AIX_USER}@${Remote_server.AIX_HOST}`, `find ${default_path} -name ${tool} 2>/dev/null | head -3`]);
         
-        let rsyncPath = "";
+        let toolPath = "";
         let stderr = "";
         whichRsync.stdout.on('data', (data) => {
-            rsyncPath = data.toString();
+            toolPath = data.toString();
             // Now ru
         });
 
@@ -794,18 +808,19 @@ function ToolPath(Remote_server,tool)
                 reject(new Error(`Error: No such file or directory: ${stderr}`));
             }
 
-            rsyncPath = rsyncPath.split('\n').find(p => p.trim().endsWith(`${tool}`)) || '';
-                if (rsyncPath ) {
+            toolPath = toolPath.split('\n').find(p => p.trim().endsWith(`${tool}`)) || '';
+                if (toolPath ) {
                     if(tool === 'rsync')  
                         {
-                            Remote_server.rsync_path = rsyncPath.trim();
+                            Remote_server.rsync_path = toolPath.trim();
                             resolve(Remote_server.rsync_path);
                             console.log(`${tool} path set to: ${Remote_server.rsync_path}`);
                         }  
-                        else{
-                            rsyncPath = rsyncPath.trim();
-                            resolve(rsyncPath);
-                            console.log(`${tool} path set to: ${rsyncPath}`);
+                        else if(tool === 'sed'){
+                            toolPath = toolPath.trim();
+                            resolve(toolPath);
+                            Remote_server.sed_path = toolPath;
+                            console.log(`${tool} path set to: ${toolPath}`);
 
                         }             
                         
@@ -830,7 +845,8 @@ async function Boot(userHost,Remote_server) {
 
         console.log("Now safe to continue. Using port:", port);
 
-        const sed_path = await ToolPath(Remote_server,'sed');
+
+      
         // Replace placeholder with port
         let finalSafeCode = safeCode.replace('VS_PORT', port);
 
@@ -838,7 +854,7 @@ async function Boot(userHost,Remote_server) {
 const sshCmd = `
 ssh -o StrictHostKeyChecking=no ${userHost} 'bash -s' <<'EOF'
 if grep '^[[:space:]]*code[[:space:]]*\(\)[[:space:]]*{' "$HOME/.bashrc"; then
-    ${sed_path} -i '/^[[:space:]]*code[[:space:]]*\(\)[[:space:]]*{/,/^[[:space:]]*}/d' "$HOME/.bashrc"
+    ${Remote_server.sed_path} -i '/^[[:space:]]*code[[:space:]]*\(\)[[:space:]]*{/,/^[[:space:]]*}/d' "$HOME/.bashrc"
 fi
 cat <<'EOC' >> "$HOME/.bashrc"
 ${finalSafeCode}
@@ -849,16 +865,11 @@ EOF`;
         await exec(sshCmd,{env: process.env}); // so that at the remote we pass all SSH_AUTH_SOCK env etc to get agent forwarding.
 
 
-
-        //Setting the port in the server instance
-        Remote_server.SetPort(port);
-
-        //Setting up the rsync path
-        await ToolPath(Remote_server,"rsync");
+      
         
 
         //Creat the terminal for reverse tunnel
-        TerminalLoader(userHost,Remote_server,process);
+        TerminalLoader(userHost,Remote_server,process,port);
        
         console.log("Boot sequence finished.");
     } catch (err) {
@@ -1013,8 +1024,24 @@ Host ${Remote_server.AIX_HOST}
                 Remote_server.Setkeypath(keyPath);
 
                 // Append if not found
+
+                // See the OS what kind of os it is
+                const oscmd = `ssh -o StrictHostKeyChecking=no ${userHost} 'uname -s'`;
+
+                const {stdout: osstring}= await exec(oscmd,{encoding:"utf8"});
+
+                Remote_server.osname = osstring.toString("utf8").trim();
+
+
                
                 await Boot(userHost,Remote_server);
+
+
+                  //Setting up the rsync path
+                await ToolPath(Remote_server,"rsync");
+
+                //Setting up the sed path
+                await ToolPath(Remote_server,"sed");
   
                 //setting up the base setup 
                 saveConfig(context, value);

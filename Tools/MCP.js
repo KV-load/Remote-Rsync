@@ -1,15 +1,19 @@
 
 //   // Dynamically import ESM-only SDK
-//   const { MCPServer } = await import('@modelcontextprotocol/sdk');
+// const MCPServer = require('@modelcontextprotocol/sdk/server');
+// const vscode = require('vscode');
 
 //   // Create your MCP server
-//   const server = new MCPServer({
+//   const server = new MCPServer.Server({
 //     name: 'my-embedded-server',
 //     version: '1.0.0',
 //   });
 
+
+//   server.registerCapabilitiesresourceTypes.register('works
+
 //   // Example: register a resource
-//   server.resources.register('workspace-files', async () => {
+//   server.registerCapabilitiesresources.register('workspace-files', async () => {
 //     const files = await vscode.workspace.findFiles('**/*');
 //     return files.map(uri => ({ uri: uri.toString() }));
 //   });

@@ -128,6 +128,7 @@ class AixFSProvider {
         //     vscode.window.showErrorMessage(`SFTP connect failed: ${err.message}`);
         // });
         this.getServers = GetServers;
+        this.Locker = false;
         this._emitter = new vscode.EventEmitter();
         this.onDidChangeFile = this._emitter.event;
     }
@@ -239,13 +240,13 @@ async streamfetch(sftp, remotePath, localPath) {
             .once('end', async () => {
                 writeStream.end();
                 vscode.window.setStatusBarMessage(`✅ Finished streaming ${remotePath}`, 2000);
-                try {
-                    // 🔄 Force reload the open document
-                    const doc = await vscode.workspace.openTextDocument(localPath);
-                    await vscode.commands.executeCommand('workbench.action.files.revert', doc.uri);
-                } catch (err) {
-                    console.error('Failed to reload:', err);
-                }
+                // try {
+                //     // 🔄 Force reload the open document
+                //     const doc = await vscode.workspace.openTextDocument(localPath);
+                //     await vscode.commands.executeCommand('workbench.action.files.revert', doc.uri);
+                // } catch (err) {
+                //     console.error('Failed to reload:', err);
+                // }
                 resolve();
             })
             .once('error', err => {
@@ -266,7 +267,7 @@ async streamfetch(sftp, remotePath, localPath) {
 
         const remotePath = uri.path;
         const tmpFile = await hash_path(remotePath,remote_server);
-        const preview_tmpFile = path.join(require('os').tmpdir(), path.basename(remotePath) + 'view');
+        // const preview_tmpFile = path.join(require('os').tmpdir(), path.basename(remotePath) + 'view');
 
         // fs.writeFileSync(preview_tmpFile, content);
 
@@ -277,14 +278,18 @@ async streamfetch(sftp, remotePath, localPath) {
             // await this._rsyncPut(preview_tmpFile, remotePath,remote_server);
 
             // fs.copyFileSync(preview_tmpFile, tmpFile);
+            this.Locker = false;
+        
 
             await this._rsyncPut(tmpFile, remotePath,remote_server);
 
-            const stat = await this.stat(remotePath,remote_server);
-            remote_server._lastModified.set(remotePath, stat.modifyTime);
-            remote_server._lastModified_size.set(remotePath, stat.size);
+               const stat = await this.stat(remotePath,remote_server);
+            await remote_server._lastModified.set(remotePath, stat.modifyTime);
+            await remote_server._lastModified_size.set(remotePath, stat.size);
+            
+            this.Locker = true;
 
-            this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
+            // this._emitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
         } catch (err) {
             throw new Error(`writeFile failed for ${remotePath}: ${err.message}`);
         }
@@ -324,6 +329,10 @@ async _rsyncPut(localPath, remotePath, remote_server) {
 
         const interval = setInterval(async () => {
             try {
+                if(this.Locker === false)
+                {
+                    return;
+                }
                 const Servers = await this.getServers();
         
 
@@ -332,8 +341,8 @@ async _rsyncPut(localPath, remotePath, remote_server) {
 
                 const stat = await this.stat(remotePath,remote_server);
                 const mtime = stat.modifyTime;
-                const lastMtime = remote_server._lastModified.get(remotePath);
-                const lastsize = remote_server._lastModified_size.get(remotePath);
+                const lastMtime = await remote_server._lastModified.get(remotePath);
+                const lastsize = await remote_server._lastModified_size.get(remotePath);
 
 
                 // bool to have the trigger event only once when the file is created

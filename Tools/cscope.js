@@ -55,13 +55,13 @@ async function queryCscope(scopeFile, queryType, symbol,Remote_server) {
   }
   // console.log(`Cscope query returned ${jsonFileEntries.length} entries`);
      
-  // console.log(`Cscope query returned ${jsonFileEntries} entries`);
+  console.log(`Cscope query returned ${jsonFileEntries} entries`);
   return jsonFileEntries;
 }
 
 
 
-async function vscodeQuery(provider,uriLocaltoRemote,document,position,Servers,queryType)
+async function vscodeQuery(provider,remote_uri,document,position,Servers,queryType)
 {
    vscode.window.showInformationMessage(`Server restart successful`);
 
@@ -71,7 +71,7 @@ async function vscodeQuery(provider,uriLocaltoRemote,document,position,Servers,q
           //Getting the server name from the uri
   
           //getting metadata from the uri
-          const remote_uri = uriLocaltoRemote.get(document.uri.toString());
+       
 
           const frag = new URLSearchParams(remote_uri.fragment);
 
