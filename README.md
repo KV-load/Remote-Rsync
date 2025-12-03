@@ -37,8 +37,11 @@ cd Remote-Rsync
 4) From there access the hello world extension (default name)
 5) Enter the ip_user@ip_addr of your machine
 6) Enter the password of ur machine and it will be safely stored in your local machine not in vscode.
-7) Once ssh is done it will open the terminal, once it is done you are good to go , to access any files just write ```bash
-   code <filename>``` it will open that file for you in vscode.
+7) Once ssh is done it will open the terminal, once it is done you are good to go , to access any files just write
+   ```bash
+   code <filename>
+   ```
+   it will open that file for you in vscode.
 
 
 
