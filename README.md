@@ -1,10 +1,13 @@
 # remote-rsync README
-
-This is the README for your extension "remote-rsync". After writing up a brief description, we recommend including the following sections.
+A replacement for the remote-ssh like on linux to be on unix.It doesn't have all that capabilities as in linux but works well like vim, but better editing and can use various open source tools which are there in vscode while editing code files.
 
 ## Features
-
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+1) It can help you edit your remote files.
+2) You can use various AI tools on that file which you are gonna edit like inline code suggestion,copilot etc.
+3) You can peek through various macros and their definitions.
+4) You can open a new file typing code <filename>.
+5) Basically you can do all things  a vim in unix system can do but with some more better features.
+6) The best thing about it is it's usability.
 
 For example if there is an image subfolder under your extension project workspace:
 
@@ -13,8 +16,14 @@ For example if there is an image subfolder under your extension project workspac
 > Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
 
 ## Requirements
+Your unix system should have some of these pacakges:
+1) sed
+2) rsync
+3) ssh
+4) bash
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+That is enough for this extension to work on your system to access remote files.
+
 
 ## Extension Settings
 
@@ -28,8 +37,8 @@ This extension contributes the following settings:
 * `myExtension.thing`: Set to `blah` to do something.
 
 ## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
+It has some issues:
+1) Currently it doesn't have context of the system on which you are working on.
 
 ## Release Notes
 
