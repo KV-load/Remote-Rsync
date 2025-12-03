@@ -24,6 +24,26 @@ Your unix system should have some of these pacakges:
 
 That is enough for this extension to work on your system to access remote files.
 
+## Known Issues
+It has some issues:
+1) Currently it doesn't have context of the system on which you are working on.
+
+
+## INSTALL
+This is an Alpha version of the extesnion so there will be bugs, but if you wanna use it you can use it as follows:
+
+```bash
+git clone git@github.com:KV-load/Remote-Rsync.git
+cd Remote-Rsync
+```
+2) Press fn+5 keys :- It will lead you to the extension development window.
+3) Press cmd+shift+p :- It will open vscode toolbar at the top.
+4) From there access the hello world extension (default name)
+5) Enter the ip_user@ip_addr of your machine
+6) Enter the password of ur machine and it will be safely stored in your local machine not in vscode.
+7) Once ssh is done it will open the terminal, once it is done you are good to go , to access any files just write ```bash code <filename>``` it will open that file for you in vscode.
+
+
 
 ## Extension Settings
 
@@ -36,9 +56,6 @@ This extension contributes the following settings:
 * `myExtension.enable`: Enable/disable this extension.
 * `myExtension.thing`: Set to `blah` to do something.
 
-## Known Issues
-It has some issues:
-1) Currently it doesn't have context of the system on which you are working on.
 
 ## Release Notes
 
