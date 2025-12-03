@@ -9,11 +9,7 @@ A replacement for the remote-ssh like on linux to be on unix.It doesn't have all
 5) Basically you can do all things  a vim in unix system can do but with some more better features.
 6) The best thing about it is it's usability.
 
-For example if there is an image subfolder under your extension project workspace:
 
-\!\[feature X\]\(images/feature-x.png\)
-
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
 
 ## Requirements
 Your unix system should have some of these pacakges:
@@ -41,7 +37,8 @@ cd Remote-Rsync
 4) From there access the hello world extension (default name)
 5) Enter the ip_user@ip_addr of your machine
 6) Enter the password of ur machine and it will be safely stored in your local machine not in vscode.
-7) Once ssh is done it will open the terminal, once it is done you are good to go , to access any files just write ```bash code <filename>``` it will open that file for you in vscode.
+7) Once ssh is done it will open the terminal, once it is done you are good to go , to access any files just write ```bash
+   code <filename>``` it will open that file for you in vscode.
 
 
 
@@ -57,6 +54,13 @@ This extension contributes the following settings:
 * `myExtension.thing`: Set to `blah` to do something.
 
 
+For example if there is an image subfolder under your extension project workspace:
+
+\!\[feature X\]\(images/feature-x.png\)
+
+> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+>
+> 
 ## Release Notes
 
 Users appreciate release notes as you update your extension.
