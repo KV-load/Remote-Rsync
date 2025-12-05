@@ -16,8 +16,8 @@
   "url": "https://github.com/KV-load/Remote-Rsync.git"
 },
   "activationEvents": [
-    "onCommand: remote-rsync.Remote-Rsync",
-    "onCommand: AIX_Terminals"
+    "onCommand:remote-rsync.Remote-Rsync",
+    "onCommand:AIX_Terminals"
   ],
   "contributes": {
     "commands": [
