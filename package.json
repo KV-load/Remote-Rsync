@@ -11,6 +11,10 @@
   ],
   "main": "./extension.js",
   "publisher": "Kushal Verma",
+  "repository": {
+  "type": "git",
+  "url": "https://github.com/KV-load/Remote-Rsync.git"
+},
   "activationEvents": [
     "onCommand: remote-rsync.Remote-Rsync",
     "onCommand: AIX_Terminals"
