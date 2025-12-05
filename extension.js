@@ -367,7 +367,7 @@ const saving_Doc =  //Saving the files which will be done by my custom fs.
 
 
     //To defined it globally so that disposable can use .
-    const disposable = vscode.commands.registerCommand('remote-rsync.helloWorld', async function () {
+    const disposable = vscode.commands.registerCommand('remote-rsync.Remote-Rsync', async function () {
 
         // Creating an reload_Manager instance
         const reloadManager = new ServerReload(context, mountSSHFS);

@@ -11,11 +11,15 @@
   ],
   "main": "./extension.js",
   "publisher": "Kushal Verma",
+  "activationEvents": [
+    "onCommand: remote-rsync.Remote-Rsync",
+    "onCommand: AIX_Terminals"
+  ],
   "contributes": {
     "commands": [
       {
-        "command": "remote-rsync.helloWorld",
-        "title": "Hello World"
+        "command": "remote-rsync.Remote-Rsync",
+        "title": "Remote-Rsync"
       },
       {
         "command": "AIX_Terminals",
